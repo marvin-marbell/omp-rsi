@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createLearning } from "../lib/rsi-learning.js";
+import { createRsi } from "../lib/rsi.js";
 import { digest, mappingKey, projectSource, independentSources, bytes, PROJECTION_VERSION } from "../lib/rsi-learning-data.js";
 import { LEARNING_VERSION, mapQuestions, mapFeature, learningIdentity, FRAME } from "../lib/rsi-learning-rubric.js";
 
@@ -15,7 +16,7 @@ function plan(id = "job", text = "The regression test caught a stale write and t
 	return { plan_id: id, revision: revision(value), plan: value, validation: { complete: true } };
 }
 function answers(questions, overrides = {}) {
-	const defaults = { mechanism: "verification-design", evidence_status: "observed", signal: "failure", destination: "policy", ambiguity: "clear", generality: "cross-task", sufficiency: "supported", operation: "rewrite", novelty: "covered" };
+	const defaults = { mechanism: "verification-design", evidence_status: "observed", signal: "failure", destination: "policy", attribution: "unknown", ambiguity: "clear", generality: "cross-task", sufficiency: "supported", operation: "rewrite", novelty: "covered" };
 	return Object.fromEntries(Object.entries(questions).map(([id, q]) => {
 		if (q.type === "score") return [id, { type: "score", score: 2, confidence: 0.8 }];
 		const selected = overrides[id] ?? (id === "witness" ? Object.keys(q.criteria).find(k => q.criteria[k]?.path?.endsWith(".summary")) ?? "none" : id === "target_section" ? Object.keys(q.criteria)[1] ?? "none" : defaults[id]);
@@ -66,6 +67,33 @@ function fixture(options = {}) {
 }
 const mine = (f, fields = {}) => f.learning.mine({ kind: "plans", source_ids: [...f.plans.keys()], ...fields }, { no_git: true }, exec);
 const mapIds = result => result.receipts.filter(r => r.status === "assessed").map(r => r.id);
+
+test("selected PR review adapter binds one head, stays local, and maps stale approval without blaming agent", async () => {
+	const f = fixture();
+	let remoteCalls = 0;
+	const rsi = createRsi({ typesafeEnabled: false }, {
+		memory: async (_argv, { stdin }) => JSON.stringify(await f.local(JSON.parse(stdin))),
+		evaluate: async () => { remoteCalls++; throw new Error("unexpected remote request"); },
+	});
+	const fields = { plan_id: "job", repository: "marvin-marbell/omp-rsi", pr_number: 23,
+		head_sha: "b".repeat(40), review_id: 123, review_commit: "a".repeat(40),
+		review_state: "APPROVED", summary: "Reviewed predecessor commit; head changed afterward." };
+	await assert.rejects(rsi.run("review_observe", { ...fields, summary: "x".repeat(501) }), /summary/);
+	const saved = await rsi.run("review_observe", fields, { no_git: true });
+	assert.equal(saved.network_called, false);
+	assert.equal(remoteCalls, 0);
+	const artifact = f.artifacts.get(saved.receipt.id);
+	assert.deepEqual(artifact.bindings.plans, [{ plan_id: "job", revision: f.plans.get("job").revision }]);
+	const [state] = projectSource({ kind: "observation", id: artifact.id, revision: artifact.revision }, artifact);
+	assert.equal(state.report.type, "pr-review-event");
+	assert.equal(state.report.head_matches_review, false);
+	assert.ok(state.evidence_rows.some(row => row.path === "observation.data.pr_review.summary" && row.quote === fields.summary));
+	const feature = mapFeature({ id: "map-review", revision: "r1", bindings: artifact.bindings,
+		data: { state, assessment: { response: { answers: answers(mapQuestions(state), { attribution: "agent_omission" }) } } } });
+	assert.equal(feature.attribution, "unknown");
+	assert.equal(feature.evidence_status, "unreviewed");
+	assert.equal(independentSources([feature, { ...feature, source_key: "plan:job", source_family_keys: ["plan:job"] }]), 1);
+});
 
 test("safe validation detail survives failed map receipts and unavailable reductions", async () => {
 	let fail = true;
@@ -533,6 +561,9 @@ test("review history, latest rejection, exceptions and template pin remain expli
 	const state = f.assessed[0].state;
 	assert.equal(state.report.latest_review, "rejected");
 	assert.equal(state.context.template_pin.revision, "pinned-template");
+	assert.equal(state.report.review_count, 2);
+	assert.equal(state.coverage.projection_mode, "plan-report-units");
+	assert.equal(mapFeature(f.artifacts.get(result.receipts[0].id)).attribution, "unknown");
 	assert.match(JSON.stringify(state.evidence_rows), /accepted.*rejected|rejected.*accepted/);
 	const reduced = await f.learning.reduce({ artifact_ids: mapIds(result) });
 	assert.equal(reduced.issues[0].counts.evidence_status.unreviewed, 2);
@@ -833,4 +864,110 @@ test("observation telemetry wrapper keeps exact session-family identity even whe
 	const result = await f.learning.reduce({ artifact_ids: mapIds(mapped) });
 	assert.equal(result.issues[0].independent_source_count, 1);
 	assert.ok(f.assessed.slice(0, mapped.calls).every(a => a.state.context.session_marker === "opaque-session"));
+});
+
+test("schema-2 trajectory mine and reduce separates omission, external change, template and retrieval outcomes without duplicate votes", async () => {
+	const event = (id, kind, source, cause, summary, before, after) => ({
+		id, kind, at: `2026-09-23T00:00:${String(id.length).padStart(2, "0")}Z`, actor: "agent",
+		source, reference: `review/${id}`, summary, before, after, cause,
+	});
+	const omission = plan("omission");
+	omission.plan.schema = 2;
+	omission.plan.phase = "planning"; omission.plan.steps = [];
+	omission.plan.timeline = [
+		event("round-one", "review_feedback", "pr_review", "agent_omission", "First correction: agent omitted the required stale-write check.", "check missing", "check added"),
+		event("round-two", "review_feedback", "pr_review", "agent_omission", "Second correction: agent omitted the recovery scenario.", "recovery missing", "recovery added"),
+		event("bad-template", "steering", "user", "agent_omission", "Pinned template did not instruct a recovery probe and agent omitted it.", "probe absent", "probe added"),
+		event("stale-memory", "retrieval", "memory", "unknown", "Retrieved a stale memory note about the release.", "stale indexed note", "source inspected"),
+		event("corrected-memory", "retrieval", "memory", "none", "Corrected retrieval found the current source and the task succeeded.", "stale note", "current source"),
+		event("positive-control", "review_feedback", "pr_review", "none", "Positive control: reviewer confirmed the adverse transition was tested.", "test planned", "test observed"),
+	];
+	omission.revision = revision(omission.plan);
+	const external = plan("external");
+	external.plan.schema = 2;
+	external.plan.phase = "planning"; external.plan.steps = [];
+	external.plan.timeline = [
+		event("scope-one", "external_change", "external", "external_change", "Customer changed the required behavior after implementation.", "original scope", "new scope"),
+		event("scope-two", "external_change", "external", "external_change", "Second round was a newly introduced external constraint.", "initial constraint", "new constraint"),
+		event("good-template", "steering", "user", "none", "Pinned template prompted a useful adverse case before implementation.", "adverse case planned", "adverse case checked"),
+	];
+	external.revision = revision(external.plan);
+	const f = fixture({ plans: [omission, external], answers: state => {
+		if (state.source) {
+			const r = state.report, id = r.id;
+			const route = id === "bad-template" ? ["context-and-scope", "template", "failure"]
+				: id === "good-template" ? ["context-and-scope", "no-change", "success"]
+				: id === "stale-memory" ? ["knowledge-reuse", "retrieval", "failure"]
+				: id === "corrected-memory" ? ["knowledge-reuse", "retrieval", "success"]
+				: id === "positive-control" ? ["evidence-integrity", "no-change", "success"]
+				: r.type === "timeline-event" ? ["verification-design", r.cause_claim === "external_change" ? "no-change" : "template", "failure"]
+				: ["uncertain", "no-change", "uncertain"];
+			return { mechanism: route[0], destination: route[1], signal: route[2],
+				attribution: r.type === "timeline-event" ? r.cause_claim : "unknown",
+				witness: state.evidence_rows.find(row => row.path.endsWith(".summary"))?.id ?? "none" };
+		}
+		const routed = state.group.witnesses[0].destination;
+		return { destination: routed, sufficiency: "mixed", operation: routed === "no-change" ? "retain" : "other-artifact" };
+	} });
+	let fields = { kind: "plans", source_ids: ["omission", "external"], max_calls: 12 };
+	const mapped = [];
+	do {
+		const result = await f.learning.mine(fields);
+		mapped.push(...mapIds(result));
+		fields = result.resume;
+	} while (fields);
+	const units = mapped.map(id => f.artifacts.get(id).data.state);
+	assert.ok(units.some(unit => unit.report.type === "template-choice" && unit.evidence_rows.some(row => row.path === "plan.template.template_id")));
+	assert.ok(units.some(unit => unit.report.type === "original-requirement" && unit.evidence_rows.some(row => row.path.endsWith(".description"))));
+	assert.ok(units.some(unit => unit.report.type === "timeline-event" && unit.evidence_rows.some(row => row.path.endsWith(".before"))));
+	assert.ok(units.every(unit => unit.source.revision === f.plans.get(unit.source.id).revision));
+	const externalMap = mapped.find(id => f.artifacts.get(id).data.state.report.id === "scope-one");
+	const misread = structuredClone(f.artifacts.get(externalMap));
+	misread.data.assessment.response.answers.attribution.choice = "agent_omission";
+	assert.equal(mapFeature(misread).attribution, "unknown", "an optimistic model cannot rewrite a recorded external cause");
+	const first = mapped.find(id => f.artifacts.get(id).data.state.report.id === "round-one");
+	const feature = mapFeature(f.artifacts.get(first));
+	assert.equal(feature.attribution, "agent_omission");
+	assert.equal(feature.evidence_status, "unreviewed");
+	assert.equal(feature.witness.quote, omission.plan.timeline[0].summary);
+	assert.equal(feature.report.event_reference, "review/round-one");
+	const refreshed = await f.learning.mine({ kind: "plans", source_ids: ["omission"], refresh: true, max_calls: 12 });
+	const duplicate = refreshed.receipts.find(receipt => f.artifacts.get(receipt.id).data.state.report.id === "round-one").id;
+	const reduced = await f.learning.reduce({ artifact_ids: [...mapped, duplicate, first], max_issues: 8 });
+	assert.equal(reduced.coverage.duplicate_input_ids, 1);
+	const issue = (mechanism, attribution) => reduced.issues.find(value => value.mechanism === mechanism && value.attribution === attribution);
+	const omitted = issue("verification-design", "agent_omission");
+	const changed = issue("verification-design", "external_change");
+	assert.equal(omitted.owner, "template");
+	assert.equal(omitted.counts.mapped_units, 3);
+	assert.equal(omitted.counts.deduplicated_units, 2);
+	assert.equal(omitted.independent_source_count, 1);
+	assert.equal(changed.owner, "no-change");
+	assert.equal(changed.counts.deduplicated_units, 2);
+	assert.ok(changed.witnesses.every(value => value.attribution === "external_change"));
+	assert.equal(issue("context-and-scope", "agent_omission").owner, "template");
+	assert.equal(issue("context-and-scope", "none").owner, "no-change");
+	assert.equal(issue("knowledge-reuse", "unknown").owner, "retrieval");
+	assert.equal(issue("knowledge-reuse", "none").owner, "retrieval");
+	assert.equal(issue("evidence-integrity", "none").owner, "no-change");
+	assert.ok(reduced.issues.every(value => value.automatic_promotion === false && value.witnesses.every(w => w.source.revision === f.plans.get(w.source.id).revision)));
+});
+
+test("disclosure preview exposes the exact next unit without assessment or persistence", async () => {
+	const p = plan("preview");
+	p.plan.schema = 2; p.plan.phase = "planning"; p.plan.steps = [];
+	p.plan.timeline = [{ id: "correction", kind: "review_feedback", source: "pr_review",
+		reference: "pr/19/review/1", summary: "A bounded selected correction", before: "old", after: "new",
+		cause: "external_change", actor: "agent", at: "2026-09-23T00:00:00Z" }];
+	p.revision = revision(p.plan);
+	const f = fixture({ plans: [p], config: { typesafeEnabled: false } });
+	const preview = await f.learning.preview({ kind: "plans", source_id: "preview", unit: 3 });
+	assert.equal(preview.network_called, false);
+	assert.equal(preview.remote_enabled, false);
+	assert.equal(f.assessed.length, 0);
+	assert.equal(f.artifacts.size, 0);
+	const mapped = await f.learning.mine({ kind: "plans", source_ids: ["preview"], max_calls: 12 });
+	const root = f.artifacts.get(mapped.receipts.find(row => row.unit === 3).id);
+	assert.deepEqual(preview.state, root.data.state);
+	assert.deepEqual(preview.questions, root.data.questions);
 });

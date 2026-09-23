@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerPrompt } from "../src/prompt.js";
+import { createPlanSession, registerContractTools } from "../src/contract-tools.js";
 import { createDiscovery } from "../src/discovery.js";
 import { createSessionSignals } from "../lib/rsi-signals.js";
 import { projectSource } from "../lib/rsi-learning-data.js";
@@ -33,6 +34,71 @@ test("the next OMP prompt uses the current canonical policy without duplicating 
   assert.equal(next.length, 4);
   assert.match(next.at(-1), /Revised instruction/);
   assert.doesNotMatch(next.join("\n"), /First instruction/);
+});
+
+test("current plan handle survives a branch resume and never crosses a switched session", async t => {
+  const base = fixture(t);
+  const policy = join(base, "shared", "policies");
+  mkdirSync(policy, { recursive: true });
+  writeFileSync(join(policy, "agent-policy.md"), "Persistent policy\n");
+  const handlers = new Map(), branches = new Map([["one", []], ["two", []]]);
+  let session = "one", revision = "r1", reads = 0, blockNext = false, unblock;
+  const ctx = { sessionManager: { getSessionId: () => session, getBranch: () => branches.get(session) } };
+  const pi = {
+    on(name, handler) { handlers.set(name, handler); },
+    appendEntry(customType, data) { branches.get(session).push({ type: "custom", customType, data }); },
+  };
+  const memory = async (_argv, options) => {
+    reads++;
+    if (blockNext) { blockNext = false; await new Promise(resolve => { unblock = resolve; }); }
+    const request = JSON.parse(options.stdin);
+    assert.equal(request.action, "read");
+    return JSON.stringify({ revision, plan: { template: { template_id: "coding" } }, validation: { complete: false } });
+  };
+  const plans = createPlanSession(pi, memory);
+  registerPrompt(pi, { base }, plans);
+  assert.equal((await handlers.get("before_agent_start")({ systemPrompt: ["Host"] }, ctx)).systemPrompt.length, 3);
+  await plans.bind("work-one", ctx);
+  const prepared = await handlers.get("before_agent_start")({ systemPrompt: ["Host"] }, ctx);
+  assert.match(prepared.systemPrompt.at(-1), /work-one, revision r1/);
+  revision = "r2";
+  const resumed = await handlers.get("before_agent_start")({ systemPrompt: prepared.systemPrompt }, ctx);
+  assert.equal(resumed.systemPrompt.length, 4);
+  assert.match(resumed.systemPrompt.at(-1), /work-one, revision r2/);
+  session = "two";
+  handlers.get("session_switch")({}, ctx);
+  const other = await handlers.get("before_agent_start")({ systemPrompt: resumed.systemPrompt }, ctx);
+  assert.equal(other.systemPrompt.length, 3);
+  session = "one";
+  handlers.get("session_switch")({}, ctx);
+  assert.match((await handlers.get("before_agent_start")({ systemPrompt: other.systemPrompt }, ctx)).systemPrompt.at(-1), /work-one/);
+  assert.ok(reads >= 4);
+  blockNext = true;
+  const stale = plans.bind("late-plan", ctx);
+  await new Promise(resolve => setImmediate(resolve));
+  session = "two";
+  handlers.get("session_switch")({}, ctx);
+  unblock();
+  await assert.rejects(stale, /Session changed before plan binding/);
+  assert.equal(branches.get("two").length, 0);
+});
+
+test("creating or amending a plan never invokes remote preflight even when TypeSafe is enabled", async () => {
+  let tool, remoteCalls = 0;
+  const string = { describe() { return this; }, optional() { return this; } };
+  const pi = { zod: { string: () => string, boolean: () => string, object: value => value }, registerTool(value) { tool = value; } };
+  const memory = async (_argv, { stdin }) => JSON.stringify({
+    plan: { plan_id: JSON.parse(stdin).action === "amend" ? "successor" : "original" },
+    path: "/memory/plans/example.md", revision: "r1", persistence: { saved: true },
+  });
+  registerContractTools(pi, { typesafeEnabled: true }, { memory, rsi: { preflight() { remoteCalls++; throw new Error("remote request"); } } });
+  for (const action of ["create", "amend"]) {
+    const result = await tool.execute("call", { action, request: "{}" }, undefined, undefined, {});
+    const saved = JSON.parse(result.content[0].text);
+    assert.equal(saved.persistence.saved, true);
+    assert.equal(Object.hasOwn(saved, "policy_preflight"), false);
+  }
+  assert.equal(remoteCalls, 0);
 });
 
 test("OMP observations project as metadata reports without leaking tool input or output", () => {

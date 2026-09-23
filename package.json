@@ -1,6 +1,6 @@
 {
   "name": "omp-rsi",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Git-backed agent memory, shared plans, policy and RSI for Oh My Pi",
   "type": "module",
   "license": "MIT",

@@ -6,12 +6,12 @@
   },
   "metadata": {
     "description": "Marvin's plugins for Oh My Pi",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "omp-rsi",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "description": "Git-backed agent memory, shared plans, editable policy and evidence-linked RSI",
       "source": "./",
       "category": "productivity",

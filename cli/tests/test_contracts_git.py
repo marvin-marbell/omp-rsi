@@ -135,7 +135,11 @@ def test_push_success_and_rejection_keep_local_save(repo, tmp_path):
     hook = remote / "hooks/pre-receive"
     hook.write_text("#!/bin/sh\nexit 1\n")
     hook.chmod(0o755)
-    third = update(repo, second)
+    third = execute_request({"action": "update", "plan_id": "example", "revision": second["revision"],
+                             "work_item_id": "work", "evidence": [{
+                                 "id": "delivery", "requirement_id": "outcome",
+                                 "summary": "Observed local save", "reference": "local commit",
+                             }]}, repo / "memory")
     assert third["persistence"]["saved"]
     assert third["persistence"]["commit"] == "committed"
     assert third["persistence"]["sync"] == "failed"
