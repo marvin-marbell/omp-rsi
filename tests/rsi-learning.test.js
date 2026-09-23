@@ -95,6 +95,32 @@ test("selected PR review adapter binds one head, stays local, and maps stale app
 	assert.equal(independentSources([feature, { ...feature, source_key: "plan:job", source_family_keys: ["plan:job"] }]), 1);
 });
 
+test("selected retrieval hashes a real entry revision locally but excludes its private path and body from remote projection", async () => {
+	const privatePath = "shared/knowledge/private-topic.md";
+	const f = fixture({ local: request => request.action === "entry_snapshot"
+		? { path: privatePath, revision: `sha256:${"e".repeat(64)}`, bytes: 843, content_retained: false } : undefined });
+	let remoteCalls = 0;
+	const rsi = createRsi({ typesafeEnabled: false }, {
+		memory: async (_argv, { stdin }) => JSON.stringify(await f.local(JSON.parse(stdin))),
+		evaluate: async () => { remoteCalls++; throw new Error("unexpected remote request"); },
+	});
+	const saved = await rsi.run("retrieval_observe", { plan_id: "job", entry_path: privatePath,
+		outcome: "contradicted", summary: "The selected earlier entry conflicted with the corrected retrieval." }, { no_git: true });
+	assert.equal(saved.network_called, false);
+	assert.equal(saved.entry_retrieval.revision, `sha256:${"e".repeat(64)}`);
+	assert.equal(f.artifacts.get(saved.receipt.id).data.entry_retrieval.path, privatePath);
+	const preview = await f.learning.preview({ kind: "observations", source_id: saved.receipt.id });
+	assert.equal(preview.state.report.type, "memory-retrieval");
+	assert.equal(preview.network_called, false);
+	assert.equal(remoteCalls, 0);
+	assert.doesNotMatch(JSON.stringify(preview.state), /private-topic/);
+	assert.ok(preview.state.evidence_rows.some(row => row.path === "observation.data.entry_retrieval.summary"));
+	const feature = mapFeature({ id: "map-memory", revision: "r1", bindings: f.artifacts.get(saved.receipt.id).bindings,
+		data: { state: preview.state, assessment: { response: { answers: answers(mapQuestions(preview.state), { attribution: "agent_omission" }) } } } });
+	assert.equal(feature.attribution, "unknown");
+	assert.equal(feature.evidence_status, "unreviewed");
+});
+
 test("safe validation detail survives failed map receipts and unavailable reductions", async () => {
 	let fail = true;
 	const f = fixture({ assess: async () => fail ? { status: "unavailable", error_code: "TYPESAFE_RESPONSE_INVALID", validation_code: "TYPESAFE_INVALID_SCORE_WEIGHT" } : undefined });
