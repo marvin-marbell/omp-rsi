@@ -1,6 +1,7 @@
 import { createInstructionSourceDiscovery } from "../lib/rsi-source-discovery.js";
 
-/** Automatic capture uses only the invoking session's current OMP context. */
-export function createDiscovery(config) {
-	return createInstructionSourceDiscovery(config);
+/** Public OMP skill snapshot; missing API remains an explicit coverage gap. */
+export function createDiscovery(config, pi) {
+	const getSkills = typeof pi?.pi?.getActiveSkills === "function" ? () => pi.pi.getActiveSkills() : undefined;
+	return createInstructionSourceDiscovery(config, getSkills);
 }
