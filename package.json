@@ -1,6 +1,6 @@
 {
   "name": "omp-rsi",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Git-backed agent memory, shared plans, policy and RSI for Oh My Pi",
   "type": "module",
   "license": "MIT",
@@ -15,7 +15,32 @@
     "test": "node --test tests/*.test.js"
   },
   "omp": {
-    "extensions": ["./src/index.js"]
+    "extensions": ["./src/index.js"],
+    "settings": {
+      "base": {
+        "type": "string",
+        "description": "Absolute local memory directory; takes effect after restarting OMP."
+      },
+      "agentId": {
+        "type": "string",
+        "description": "Local agent ID for memory entries; takes effect after restarting OMP."
+      },
+      "typesafeEnabled": {
+        "type": "boolean",
+        "default": false,
+        "description": "Allow explicit remote TypeSafe assessments. Set TYPESAFE_API_KEY in the OMP process environment; restart OMP."
+      },
+      "rsiInstructionDiscoveryEnabled": {
+        "type": "boolean",
+        "default": false,
+        "description": "Allow explicit local instruction and skill discovery; combined with TypeSafe may disclose selected bodies. Restart OMP."
+      },
+      "rsiTelemetryEnabled": {
+        "type": "boolean",
+        "default": false,
+        "description": "Collect tool-result metadata for explicitly requested local observations; restart OMP."
+      }
+    }
   },
   "files": ["src", "lib", "cli", "LICENSE"]
 }

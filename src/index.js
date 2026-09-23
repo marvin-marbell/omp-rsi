@@ -1,4 +1,4 @@
-import { resolveConfig } from "./config.js";
+import { readPluginSettings, resolveConfig } from "./config.js";
 import { createMemoryRunner } from "./runner.js";
 import { registerSetupTools } from "./setup-tools.js";
 import { registerGraphTools } from "./graph-tools.js";
@@ -13,7 +13,7 @@ import { createRsiRuntime, registerRsiTool } from "./rsi-tool.js";
 import { registerPrompt } from "./prompt.js";
 
 export default function ompRsi(pi) {
-  const config = resolveConfig();
+  const config = resolveConfig(readPluginSettings());
   const memory = createMemoryRunner(config);
   const signals = createSignals(pi, config);
   const discover = createDiscovery(config, pi);
