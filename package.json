@@ -1,0 +1,21 @@
+{
+  "name": "omp-rsi",
+  "version": "0.1.0",
+  "description": "Git-backed agent memory, shared plans, policy and RSI for Oh My Pi",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marvin-marbell/omp-rsi.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "omp": {
+    "extensions": ["./src/index.js"]
+  },
+  "files": ["src", "lib", "cli", "LICENSE"]
+}
