@@ -58,6 +58,21 @@ class SearchResult:
     snippet: str
     source: str = "memory"
 
+def _brief(value: object) -> str:
+    text = str(value)
+    return text if len(text) <= 160 else text[:159] + "…"
+
+
+def _summary_frontmatter(raw: dict) -> dict:
+    fields = ("description", "author", "created", "updated",
+              "category", "status", "confidence", "tags")
+    return {
+        key: ([_brief(tag) for tag in raw[key][:8]]
+              + (["…"] if len(raw[key]) > 8 else []))
+        if key == "tags" and isinstance(raw[key], list) else _brief(raw[key])
+        for key in fields if key in raw
+    }
+
 
 def _matches_filter(fm: Frontmatter, **filters: str | None) -> bool:
     """Check if frontmatter matches all provided filters."""
@@ -387,15 +402,10 @@ def search(
         SearchResult(
             rank=rank,
             path=doc.file_path,
-            section=doc.section_title,
-            section_description=doc.section_description,
+            section=_brief(doc.section_title),
+            section_description=_brief(doc.section_description),
             score=round(score, 2),
-            file_frontmatter={
-                key: doc.frontmatter.raw[key]
-                for key in ("description", "author", "created", "updated",
-                            "category", "status", "confidence", "tags")
-                if key in doc.frontmatter.raw
-            },
+            file_frontmatter=_summary_frontmatter(doc.frontmatter.raw),
             snippet=extract_snippet(doc.section_content, query_tokens),
             source=doc.source,
         )
