@@ -11,6 +11,7 @@
   "plugins": [
     {
       "name": "omp-rsi",
+      "version": "0.2.0",
       "description": "Git-backed agent memory, shared plans, editable policy and evidence-linked RSI",
       "source": "./",
       "category": "productivity",
