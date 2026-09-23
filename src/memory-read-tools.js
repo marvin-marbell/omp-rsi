@@ -32,10 +32,10 @@ export function registerMemoryReadTools(pi, { memory }) {
 	pi.registerTool({
 		name: "memory_section",
 		label: "Read memory section",
-		description: "Read one section of a memory entry by (partial) title. The narrowest read: prefer this over reading whole files.",
+		description: "Read a memory section by partial title or the section reference returned by memory_search.",
 		parameters: z.object({
 			file_path: z.string().describe("Path of the markdown memory entry."),
-			title: z.string().describe("Section title; partial matches are accepted."),
+			title: z.string().describe("Partial section title or section reference from memory_search."),
 		}),
 		approval: "read",
 		async execute(_id, args, signal) {

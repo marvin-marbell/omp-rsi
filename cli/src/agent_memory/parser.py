@@ -6,10 +6,14 @@ with progressive disclosure semantics.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 
 import yaml
+
+_SECTION_REFERENCE = re.compile(r"(.{64})… \[sha256:([0-9a-f]{64})\]")
 
 
 @dataclass
@@ -121,14 +125,27 @@ def parse_sections(body: str) -> list[Section]:
     return sections
 
 
-def extract_section(body: str, query: str) -> list[Section]:
-    """Extract sections matching a query (case-insensitive partial match).
+def section_lookup(title: str) -> str:
+    """Keep search-to-section queries bounded and unambiguous."""
+    if len(title) <= 160 and not _SECTION_REFERENCE.fullmatch(title):
+        return title
+    return f"{title[:64]}… [sha256:{sha256(title.encode('utf-8')).hexdigest()}]"
 
-    Returns all matching sections. Mirrors the bash script's substring matching.
-    """
+
+def extract_section(body: str, query: str) -> list[Section]:
+    """Extract sections by partial title or a bounded search-result reference."""
     sections = parse_sections(body)
+    reference = _SECTION_REFERENCE.fullmatch(query)
+    if reference:
+        prefix, digest = reference.groups()
+        matches = [section for section in sections
+                   if section.title.startswith(prefix)
+                   and sha256(section.title.encode("utf-8")).hexdigest() == digest]
+        if matches:
+            return matches
+        return [section for section in sections if section.title == query]
     query_lower = query.lower()
-    return [s for s in sections if query_lower in s.title.lower()]
+    return [section for section in sections if query_lower in section.title.lower()]
 
 
 def read_entry(path: Path) -> tuple[Frontmatter, str]:

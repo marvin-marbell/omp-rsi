@@ -156,6 +156,7 @@ def render_plan(plan):
     for key in TASK_ADDITIONS:
         if key in task:
             sections.append(f"## Task {key}")
+            sections.append(f"This section lists task-specific {key} alongside the pinned template.")
             sections.extend(f"- {v['id']}: {v['description']} Evidence: {v['evidence']}" if isinstance(v, dict) else f"- {v}" for v in task[key])
     sections += ["## Work items and evidence", "Scoped work tracks reported evidence and explicit review separately."]
     for item in plan["work_items"]:

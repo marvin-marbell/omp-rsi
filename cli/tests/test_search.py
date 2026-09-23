@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agent_memory.bm25 import BM25
+from agent_memory.cache import IndexCache, resolve_cache_path
 from agent_memory.parser import Frontmatter
 from agent_memory.search import (
     _matches_filter,
@@ -431,6 +432,93 @@ class TestSearch:
         assert r.score > 0
         assert isinstance(r.file_frontmatter, dict)
         assert r.snippet != ""
+
+    def test_result_metadata_excludes_large_plan_contract(self, tmp_path: Path) -> None:
+        base = self._create_memory_tree(tmp_path)
+        plan_dir = base / "shared" / "plans"
+        plan_dir.mkdir(parents=True)
+        (plan_dir / "large-plan.md").write_text(
+            "---\n"
+            "description: Searchable plan\n"
+            "author: kelvin\n"
+            "confidence: working\n"
+            "category: efforts\n"
+            "status: active\n"
+            "contract:\n"
+            f"  history: {'repeated evidence ' * 10000}\n"
+            "---\n"
+            "# Searchable Plan\n\n"
+            "## Outcome\n"
+            "The plan tracks a searchable outcome.\n"
+        )
+        with IndexCache(resolve_cache_path(base)) as cache:
+            cache.refresh(base)
+        for no_cache in (True, False):
+            results = search("searchable outcome", base_path=base, no_cache=no_cache)
+            plan_results = [result for result in results if result.path.endswith("large-plan.md")]
+            assert plan_results
+            assert all(result.file_frontmatter == {
+                "description": "Searchable plan",
+                "author": "kelvin",
+                "confidence": "working",
+                "category": "efforts",
+                "status": "active",
+            } for result in plan_results)
+
+    def test_result_summaries_bound_long_values(self, tmp_path: Path) -> None:
+        base = self._create_memory_tree(tmp_path)
+        entry = base / "shared" / "atlas" / "long.md"
+        entry.parent.mkdir(parents=True)
+        entry.write_text(
+            "---\n"
+            f"description: {'D' * 120000}\n"
+            "author: tester\n"
+            f"tags: [first, {'T' * 120000}, a, b, c, d, e, f, g]\n"
+            "category: atlas\n"
+            "---\n"
+            "# Long\n\n"
+            f"## {'H' * 1000}\n"
+            f"{'P' * 120000}\n\n"
+            "The retrieval result should remain readable.\n"
+            f"\n## {'H' * 1000} alternative\n"
+            "A different long-heading section.\n"
+        )
+        reference = next(
+            result.section for result in search("retrieval readable", base_path=base, no_cache=True)
+            if result.path.endswith("long.md")
+        )
+        with entry.open("a") as output:
+            output.write(f"\n## {reference}\nA literal heading shadows the generated reference.\n")
+        with IndexCache(resolve_cache_path(base)) as cache:
+            cache.refresh(base)
+        from click.testing import CliRunner
+        from agent_memory.cli import cli
+
+        for no_cache in (True, False):
+            results = search("retrieval readable", base_path=base, no_cache=no_cache)
+            row = next(result for result in results if result.path.endswith("long.md"))
+            assert len(row.section) <= 160
+            assert len(row.section_description) <= 160
+            assert len(row.file_frontmatter["description"]) <= 160
+            assert row.file_frontmatter["tags"][0] == "first"
+            assert len(row.file_frontmatter["tags"][1]) <= 160
+            assert row.file_frontmatter["tags"][-1] == "…"
+            assert len(json.dumps(row.__dict__)) < 5000
+            selected = CliRunner().invoke(
+                cli, ["--json-output", "section", row.path, row.section, "--base", str(base)]
+            )
+            assert selected.exit_code == 0
+            assert json.loads(selected.output)["title"] == "H" * 1000
+            shadow = next(
+                result for result in search("literal heading shadows", base_path=base, no_cache=no_cache)
+                if result.path.endswith("long.md")
+            )
+            assert shadow.section != row.section
+            selected_shadow = CliRunner().invoke(
+                cli, ["--json-output", "section", shadow.path, shadow.section, "--base", str(base)]
+            )
+            assert selected_shadow.exit_code == 0
+            assert json.loads(selected_shadow.output)["title"] == reference
 
     def test_limit_results(self, tmp_path: Path) -> None:
         base = self._create_memory_tree(tmp_path)

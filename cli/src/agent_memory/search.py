@@ -24,7 +24,7 @@ from pathlib import Path
 
 from agent_memory.bm25 import BM25, FIELD_WEIGHTS
 from agent_memory.cache import CachedSection, IndexCache, resolve_cache_path
-from agent_memory.parser import Frontmatter, parse_frontmatter, parse_sections
+from agent_memory.parser import Frontmatter, parse_frontmatter, parse_sections, section_lookup
 from agent_memory.snippet import extract_snippet
 from agent_memory.sources import SourceEntry, collect_all_source_files
 from agent_memory.tokenizer import tokenize
@@ -57,6 +57,21 @@ class SearchResult:
     file_frontmatter: dict
     snippet: str
     source: str = "memory"
+
+def _brief(value: object) -> str:
+    text = str(value)
+    return text if len(text) <= 160 else text[:159] + "…"
+
+
+def _summary_frontmatter(raw: dict) -> dict:
+    fields = ("description", "author", "created", "updated",
+              "category", "status", "confidence", "tags")
+    return {
+        key: ([_brief(tag) for tag in raw[key][:8]]
+              + (["…"] if len(raw[key]) > 8 else []))
+        if key == "tags" and isinstance(raw[key], list) else _brief(raw[key])
+        for key in fields if key in raw
+    }
 
 
 def _matches_filter(fm: Frontmatter, **filters: str | None) -> bool:
@@ -387,10 +402,10 @@ def search(
         SearchResult(
             rank=rank,
             path=doc.file_path,
-            section=doc.section_title,
-            section_description=doc.section_description,
+            section=section_lookup(doc.section_title),
+            section_description=_brief(doc.section_description),
             score=round(score, 2),
-            file_frontmatter=doc.frontmatter.raw,
+            file_frontmatter=_summary_frontmatter(doc.frontmatter.raw),
             snippet=extract_snippet(doc.section_content, query_tokens),
             source=doc.source,
         )
