@@ -11,6 +11,8 @@ omp plugin marketplace add marvin-marbell/omp-rsi
 omp plugin install omp-rsi@marvin-marbell
 ```
 
+For a repeat setup, run `omp plugin marketplace list` and `omp plugin list` first. Skip `marketplace add` if `marvin-marbell` is listed, and skip `plugin install` if `omp-rsi@marvin-marbell` is listed. OMP treats repeating either command as an error; use `omp plugin upgrade omp-rsi@marvin-marbell` for a newer release instead of force-reinstalling during setup.
+
 Restart the OMP session so the extension loads. Adding the marketplace and installing the plugin do **not** install backend dependencies, initialize memory, migrate data, change instructions, or enable remote assessment.
 
 In an interactive OMP session, ask the agent to call `memory_setup` in this order:
@@ -20,9 +22,14 @@ In an interactive OMP session, ask the agent to call `memory_setup` in this orde
 3. `{"action":"initialize"}` — seed missing memory structure, templates, and policy without overwriting existing content. For a file-only memory base without Git, pass `"no_git":true` and use the same flag when checking status.
 4. `{"action":"status"}` again to inspect the resulting readiness. Graph indexes are per selected project; use `gitnexus analyze` separately for each project you choose.
 
+If a different OMP session performs `install`, restart any sessions that were already open: their executable paths were resolved before installation and their status may remain stale. The installing session updates its own paths immediately.
+
 The plugin's default memory base is `~/.omp/agent/memory`; its private dependency runtime is `~/.omp/agent/plugins/omp-rsi/runtime`. It neither modifies global npm packages nor publishes memory without an explicit Git-backed action. Migration is separately previewed and revision-checked; no existing instruction file is synchronized automatically.
 
 ## Operator configuration and RSI opt-ins
+OMP **Settings → Plugins → omp-rsi@marvin-marbell** exposes the memory base, agent ID, and three independent opt-in switches below. Changes are stored by OMP in its plugin settings and take effect when you restart OMP. `base` must be an absolute path. The TypeSafe key is **not** a plugin setting: OMP masks secret fields in its UI but persists their values in a plugin lockfile, so never paste a credential there. Supply `TYPESAFE_API_KEY` through the OMP process environment (for example, an operator-managed secret store) before starting OMP. Enabling TypeSafe alone never sends data; an explicit assessment request is required.
+
+When both user plugin settings and `OMP_RSI_CONFIG` supply the same field, the user setting wins. Project `plugin-overrides.json` settings are intentionally ignored by this extension: OMP loads project files without an operator trust prompt, so a checked-out repository must not enable remote TypeSafe assessments or redirect memory. Use an operator-selected `OMP_RSI_CONFIG` for a project-specific configuration. Restart the session after changes; settings are loaded once at startup.
 
 Configuration is optional and loaded once when the extension starts. To change defaults, create an operator-owned, regular JSON file at an absolute path and set `OMP_RSI_CONFIG` **before** starting OMP:
 

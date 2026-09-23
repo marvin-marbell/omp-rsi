@@ -8,6 +8,7 @@ import { createDiscovery } from "../src/discovery.js";
 import { createSessionSignals } from "../lib/rsi-signals.js";
 import { projectSource } from "../lib/rsi-learning-data.js";
 import { createInstructionSourceDiscovery } from "../lib/rsi-source-discovery.js";
+import { readPluginSettings, resolveConfig } from "../src/config.js";
 
 function fixture(t) {
   const base = mkdtempSync(join(tmpdir(), "omp-rsi-port-"));
@@ -82,4 +83,47 @@ test("automatic audit captures visible active skill bodies and excludes hidden s
   assert.equal(result.discovery.complete, true);
   assert.equal(result.discovery.agent_scoped, false);
   assert.equal(result.discovery.classes.find(item => item.kind === "skill").user_only_excluded, 1);
+});
+
+test("only user settings may opt in TypeSafe; project overrides cannot grant consent", t => {
+  const base = fixture(t);
+  const previousXdg = process.env.XDG_DATA_HOME;
+  const previousProfile = process.env.OMP_PROFILE;
+  const previousConfig = process.env.OMP_RSI_CONFIG;
+  const previousCwd = process.cwd();
+  t.after(() => {
+    if (previousXdg === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdg;
+    if (previousProfile === undefined) delete process.env.OMP_PROFILE;
+    else process.env.OMP_PROFILE = previousProfile;
+    if (previousConfig === undefined) delete process.env.OMP_RSI_CONFIG;
+    else process.env.OMP_RSI_CONFIG = previousConfig;
+    process.chdir(previousCwd);
+  });
+  process.env.XDG_DATA_HOME = base;
+  delete process.env.OMP_PROFILE;
+  const plugins = join(base, "omp", "plugins");
+  mkdirSync(plugins, { recursive: true });
+  writeFileSync(join(plugins, "omp-plugins.lock.json"), JSON.stringify({
+    settings: { "omp-rsi": { typesafeEnabled: false, rsiTelemetryEnabled: true, agentId: "ui-agent", unrelated: "ignored" } },
+  }));
+  const configFile = join(base, "operator.json");
+  writeFileSync(configFile, JSON.stringify({ typesafeEnabled: true, agentId: "file-agent" }));
+  process.env.OMP_RSI_CONFIG = configFile;
+  const project = join(base, "work");
+  mkdirSync(join(project, ".omp"), { recursive: true });
+  mkdirSync(join(project, ".git"));
+  writeFileSync(join(project, ".omp", "plugin-overrides.json"), JSON.stringify({
+    settings: { "omp-rsi": { typesafeEnabled: true, rsiInstructionDiscoveryEnabled: true, rsiTelemetryEnabled: false, base: "/tmp/untrusted-memory" } },
+  }));
+  process.chdir(project);
+  const settings = readPluginSettings();
+  assert.deepEqual(settings, { typesafeEnabled: false, rsiTelemetryEnabled: true, agentId: "ui-agent" });
+  const effective = resolveConfig(settings);
+  assert.equal(effective.typesafeEnabled, false);
+  assert.equal(effective.rsiInstructionDiscoveryEnabled, false);
+  assert.equal(effective.rsiTelemetryEnabled, true);
+  assert.equal(effective.agentId, "ui-agent");
+  assert.equal(effective.typesafeApiKeyEnv, "TYPESAFE_API_KEY");
+  assert.equal(Object.hasOwn(settings, "typesafeApiKey"), false);
 });

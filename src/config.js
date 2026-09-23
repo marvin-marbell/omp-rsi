@@ -1,5 +1,6 @@
-import { constants, closeSync, fstatSync, openSync, readSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { constants, closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import { defaultMemoryBase, runtimeConfig } from "../lib/runtime.js";
 
 const MAX_CONFIG_BYTES = 64 * 1024;
@@ -13,23 +14,54 @@ const BOUNDS = {
 };
 const STRINGS = ["agentId", "typesafeEndpoint", "typesafeModel", "typesafeApiKeyEnv"];
 const ALLOWED = new Set([...PATHS, ...EXECUTABLES, ...BOOLEAN, ...Object.keys(BOUNDS), ...STRINGS, "instructionFiles"]);
+const PLUGIN_SETTINGS = ["base", "agentId", "typesafeEnabled", "rsiInstructionDiscoveryEnabled", "rsiTelemetryEnabled"];
 
-function readOperatorConfig(path) {
-	if (!isAbsolute(path)) throw new Error("OMP_RSI_CONFIG must be an absolute operator-selected path");
+function readJsonFile(path, label, limit) {
 	const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
 	try {
 		const info = fstatSync(fd);
-		if (!info.isFile() || info.nlink !== 1 || info.size > MAX_CONFIG_BYTES) throw new Error("OMP_RSI_CONFIG must be a regular, singly linked file no larger than 64 KiB");
-		const bytes = Buffer.alloc(Math.min(info.size + 1, MAX_CONFIG_BYTES + 1));
+		if (!info.isFile() || info.nlink !== 1 || info.size > limit) throw new Error(`${label} must be a regular, singly linked file no larger than ${limit} bytes`);
+		const bytes = Buffer.alloc(Math.min(info.size + 1, limit + 1));
 		let size = 0;
 		while (size < bytes.length) {
 			const length = readSync(fd, bytes, size, bytes.length - size, null);
 			if (!length) break;
 			size += length;
 		}
-		if (size > MAX_CONFIG_BYTES) throw new Error("OMP_RSI_CONFIG exceeds 64 KiB");
+		if (size > limit) throw new Error(`${label} exceeds ${limit} bytes`);
 		return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, size)));
 	} finally { closeSync(fd); }
+}
+
+function readOperatorConfig(path) {
+	if (!isAbsolute(path)) throw new Error("OMP_RSI_CONFIG must be an absolute operator-selected path");
+	return readJsonFile(path, "OMP_RSI_CONFIG", MAX_CONFIG_BYTES);
+}
+
+/** Match OMP's user plugin data root, including named profiles and migrated XDG data. */
+function pluginLockfile() {
+	const profile = process.env.OMP_PROFILE ?? process.env.PI_PROFILE;
+	const suffix = profile && profile !== "default" ? join("profiles", profile) : "";
+	const configRoot = join(homedir(), process.env.PI_CONFIG_DIR || ".omp", suffix);
+	const xdgRoot = process.env.XDG_DATA_HOME && join(process.env.XDG_DATA_HOME, "omp", suffix);
+	const defaultAgent = join(configRoot, "agent");
+	const customAgent = !suffix && process.env.PI_CODING_AGENT_DIR && resolve(process.env.PI_CODING_AGENT_DIR) !== defaultAgent;
+	const root = !customAgent && (process.platform === "linux" || process.platform === "darwin") && xdgRoot && existsSync(xdgRoot) ? xdgRoot : configRoot;
+	return join(root, "plugins", "omp-plugins.lock.json");
+}
+
+function settingsFrom(path) {
+	if (!existsSync(path)) return {};
+	const data = readJsonFile(path, "OMP plugin settings", 4 * 1024 * 1024);
+	const settings = data?.settings?.["omp-rsi"];
+	if (settings === undefined) return {};
+	if (!settings || typeof settings !== "object" || Array.isArray(settings)) throw new Error("OMP RSI plugin settings must be an object");
+	return Object.fromEntries(PLUGIN_SETTINGS.filter(key => Object.hasOwn(settings, key)).map(key => [key, settings[key]]));
+}
+
+/** Project overrides are untrusted repo content and cannot grant remote RSI opt-ins. */
+export function readPluginSettings() {
+	return settingsFrom(pluginLockfile());
 }
 
 /** Resolved once on plugin load. Only the operator can select settings, never tool arguments. */
