@@ -336,7 +336,7 @@ def toc_cmd(ctx: click.Context, file_path: str, base: str | None) -> None:
 def section_cmd(
     ctx: click.Context, file_path: str, title: str, base: str | None,
 ) -> None:
-    """Show content of a specific section (case-insensitive partial match)."""
+    """Show a section by partial title or a reference returned by search."""
     start = time.monotonic()
     use_json = ctx.obj["json"]
     effective_path = str(_resolve_path_with_base(file_path, base))

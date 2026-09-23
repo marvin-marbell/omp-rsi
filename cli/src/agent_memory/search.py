@@ -24,7 +24,7 @@ from pathlib import Path
 
 from agent_memory.bm25 import BM25, FIELD_WEIGHTS
 from agent_memory.cache import CachedSection, IndexCache, resolve_cache_path
-from agent_memory.parser import Frontmatter, parse_frontmatter, parse_sections
+from agent_memory.parser import Frontmatter, parse_frontmatter, parse_sections, section_lookup
 from agent_memory.snippet import extract_snippet
 from agent_memory.sources import SourceEntry, collect_all_source_files
 from agent_memory.tokenizer import tokenize
@@ -402,7 +402,7 @@ def search(
         SearchResult(
             rank=rank,
             path=doc.file_path,
-            section=_brief(doc.section_title),
+            section=section_lookup(doc.section_title),
             section_description=_brief(doc.section_description),
             score=round(score, 2),
             file_frontmatter=_summary_frontmatter(doc.frontmatter.raw),

@@ -480,9 +480,14 @@ class TestSearch:
             f"## {'H' * 1000}\n"
             f"{'P' * 120000}\n\n"
             "The retrieval result should remain readable.\n"
+            f"\n## {'H' * 1000} alternative\n"
+            "A different long-heading section.\n"
         )
         with IndexCache(resolve_cache_path(base)) as cache:
             cache.refresh(base)
+        from click.testing import CliRunner
+        from agent_memory.cli import cli
+
         for no_cache in (True, False):
             results = search("retrieval readable", base_path=base, no_cache=no_cache)
             row = next(result for result in results if result.path.endswith("long.md"))
@@ -493,6 +498,11 @@ class TestSearch:
             assert len(row.file_frontmatter["tags"][1]) <= 160
             assert row.file_frontmatter["tags"][-1] == "…"
             assert len(json.dumps(row.__dict__)) < 5000
+            selected = CliRunner().invoke(
+                cli, ["--json-output", "section", row.path, row.section, "--base", str(base)]
+            )
+            assert selected.exit_code == 0
+            assert json.loads(selected.output)["title"] == "H" * 1000
 
     def test_limit_results(self, tmp_path: Path) -> None:
         base = self._create_memory_tree(tmp_path)
