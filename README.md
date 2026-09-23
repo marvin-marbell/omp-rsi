@@ -29,7 +29,7 @@ The plugin's default memory base is `~/.omp/agent/memory`; its private dependenc
 ## Operator configuration and RSI opt-ins
 OMP **Settings → Plugins → omp-rsi@marvin-marbell** exposes the memory base, agent ID, and three independent opt-in switches below. Changes are stored by OMP in its plugin settings and take effect when you restart OMP. `base` must be an absolute path. The TypeSafe key is **not** a plugin setting: OMP masks secret fields in its UI but persists their values in a plugin lockfile, so never paste a credential there. Supply `TYPESAFE_API_KEY` through the OMP process environment (for example, an operator-managed secret store) before starting OMP. Enabling TypeSafe alone never sends data; an explicit assessment request is required.
 
-When both UI settings and `OMP_RSI_CONFIG` supply the same field, the UI setting wins. OMP project `plugin-overrides.json` settings take precedence over global UI settings. Restart the session after changes; settings are loaded once at startup.
+When both user plugin settings and `OMP_RSI_CONFIG` supply the same field, the user setting wins. Project `plugin-overrides.json` settings are intentionally ignored by this extension: OMP loads project files without an operator trust prompt, so a checked-out repository must not enable remote TypeSafe assessments or redirect memory. Use an operator-selected `OMP_RSI_CONFIG` for a project-specific configuration. Restart the session after changes; settings are loaded once at startup.
 
 Configuration is optional and loaded once when the extension starts. To change defaults, create an operator-owned, regular JSON file at an absolute path and set `OMP_RSI_CONFIG` **before** starting OMP:
 

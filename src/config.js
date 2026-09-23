@@ -1,6 +1,6 @@
 import { constants, closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { defaultMemoryBase, runtimeConfig } from "../lib/runtime.js";
 
 const MAX_CONFIG_BYTES = 64 * 1024;
@@ -59,19 +59,9 @@ function settingsFrom(path) {
 	return Object.fromEntries(PLUGIN_SETTINGS.filter(key => Object.hasOwn(settings, key)).map(key => [key, settings[key]]));
 }
 
-/** OMP's plugin UI writes to its user lockfile; project overrides take precedence. */
-export function readPluginSettings(cwd = process.cwd()) {
-	const global = settingsFrom(pluginLockfile());
-	let directory = resolve(cwd);
-	for (;;) {
-		if (existsSync(join(directory, ".omp")) || existsSync(join(directory, ".git"))) {
-			const overrides = join(directory, ".omp", "plugin-overrides.json");
-			return { ...global, ...settingsFrom(overrides) };
-		}
-		const parent = dirname(directory);
-		if (parent === directory) return global;
-		directory = parent;
-	}
+/** Project overrides are untrusted repo content and cannot grant remote RSI opt-ins. */
+export function readPluginSettings() {
+	return settingsFrom(pluginLockfile());
 }
 
 /** Resolved once on plugin load. Only the operator can select settings, never tool arguments. */
