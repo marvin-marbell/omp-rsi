@@ -129,7 +129,7 @@ memory section memory/my-agent/atlas/swarm-messaging.md "delivery"
 
 Section titles are matched with case-insensitive partial matching, so `"delivery"` matches `"Delivery Guarantees"`.
 
-For headings longer than 160 characters, `memory search --json-output` returns a bounded `section` reference with a title preview and SHA-256 identifier. Pass that value unchanged to `memory section <path> "<section>"`; ordinary titles still support partial matching.
+For headings longer than 160 characters or shaped like a reference, `memory search --json-output` returns a bounded `section` reference with a title preview and SHA-256 identifier. Pass that value unchanged to `memory section <path> "<section>"`; ordinary titles still support partial matching.
 
 ### Validate entries
 

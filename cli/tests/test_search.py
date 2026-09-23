@@ -483,6 +483,12 @@ class TestSearch:
             f"\n## {'H' * 1000} alternative\n"
             "A different long-heading section.\n"
         )
+        reference = next(
+            result.section for result in search("retrieval readable", base_path=base, no_cache=True)
+            if result.path.endswith("long.md")
+        )
+        with entry.open("a") as output:
+            output.write(f"\n## {reference}\nA literal heading shadows the generated reference.\n")
         with IndexCache(resolve_cache_path(base)) as cache:
             cache.refresh(base)
         from click.testing import CliRunner
@@ -503,6 +509,16 @@ class TestSearch:
             )
             assert selected.exit_code == 0
             assert json.loads(selected.output)["title"] == "H" * 1000
+            shadow = next(
+                result for result in search("literal heading shadows", base_path=base, no_cache=no_cache)
+                if result.path.endswith("long.md")
+            )
+            assert shadow.section != row.section
+            selected_shadow = CliRunner().invoke(
+                cli, ["--json-output", "section", shadow.path, shadow.section, "--base", str(base)]
+            )
+            assert selected_shadow.exit_code == 0
+            assert json.loads(selected_shadow.output)["title"] == reference
 
     def test_limit_results(self, tmp_path: Path) -> None:
         base = self._create_memory_tree(tmp_path)
