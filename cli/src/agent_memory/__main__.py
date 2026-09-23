@@ -1,8 +1,7 @@
 """Allow `python -m agent_memory` as an alternative to the `memory` console script.
 
-The DeepSeek Harness plugin (this repository's root package) prefers the
-installed `memory` entry point but falls back to `python -m agent_memory`,
-which requires this shim.
+The OMP runner prefers the installed `memory` entry point and uses this module
+when only the Python interpreter is available.
 """
 
 from agent_memory.cli import cli
