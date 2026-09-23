@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agent_memory.bm25 import BM25
+from agent_memory.cache import IndexCache, resolve_cache_path
 from agent_memory.parser import Frontmatter
 from agent_memory.search import (
     _matches_filter,
@@ -431,6 +432,38 @@ class TestSearch:
         assert r.score > 0
         assert isinstance(r.file_frontmatter, dict)
         assert r.snippet != ""
+
+    def test_result_metadata_excludes_large_plan_contract(self, tmp_path: Path) -> None:
+        base = self._create_memory_tree(tmp_path)
+        plan_dir = base / "shared" / "plans"
+        plan_dir.mkdir(parents=True)
+        (plan_dir / "large-plan.md").write_text(
+            "---\n"
+            "description: Searchable plan\n"
+            "author: kelvin\n"
+            "confidence: working\n"
+            "category: efforts\n"
+            "status: active\n"
+            "contract:\n"
+            f"  history: {'repeated evidence ' * 10000}\n"
+            "---\n"
+            "# Searchable Plan\n\n"
+            "## Outcome\n"
+            "The plan tracks a searchable outcome.\n"
+        )
+        with IndexCache(resolve_cache_path(base)) as cache:
+            cache.refresh(base)
+        for no_cache in (True, False):
+            results = search("searchable outcome", base_path=base, no_cache=no_cache)
+            plan_results = [result for result in results if result.path.endswith("large-plan.md")]
+            assert plan_results
+            assert all(result.file_frontmatter == {
+                "description": "Searchable plan",
+                "author": "kelvin",
+                "confidence": "working",
+                "category": "efforts",
+                "status": "active",
+            } for result in plan_results)
 
     def test_limit_results(self, tmp_path: Path) -> None:
         base = self._create_memory_tree(tmp_path)

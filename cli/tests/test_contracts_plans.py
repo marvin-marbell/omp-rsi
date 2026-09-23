@@ -63,6 +63,23 @@ def test_discovery_review_snapshot_and_memory_frontmatter(api):
     assert data["author"] == "parent"
     assert not api({"action": "validate", "plan_id": "example"})["complete"]
 
+def test_plan_with_task_additions_has_readable_sections(api):
+    reviewed = api({"action": "review", "template_id": "coding"})
+    request = reviewed["create_example"]
+    request["task"]["achievements"] = [
+        {"id": "extra", "description": "Deliver extra outcome", "evidence": "Observed behavior"},
+    ]
+    request["task"]["steps"] = ["Exercise the changed workflow"]
+    request["task"]["boundaries"] = ["Respect the operator's permissions"]
+    request["task"]["validation"] = [
+        {"id": "extra_check", "description": "Check outcome", "evidence": "Observed result"},
+    ]
+    request["task"]["work_items"][0]["requirement_ids"].extend(["extra", "extra_check"])
+    result = api(request)
+    validation = validate_file(Path(result["path"]))
+    assert validation.is_valid
+    assert validation.warnings == []
+
 
 def test_lifecycle_report_review_and_completion(api):
     plan = create(api)

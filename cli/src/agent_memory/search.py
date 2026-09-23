@@ -390,7 +390,12 @@ def search(
             section=doc.section_title,
             section_description=doc.section_description,
             score=round(score, 2),
-            file_frontmatter=doc.frontmatter.raw,
+            file_frontmatter={
+                key: doc.frontmatter.raw[key]
+                for key in ("description", "author", "created", "updated",
+                            "category", "status", "confidence", "tags")
+                if key in doc.frontmatter.raw
+            },
             snippet=extract_snippet(doc.section_content, query_tokens),
             source=doc.source,
         )
