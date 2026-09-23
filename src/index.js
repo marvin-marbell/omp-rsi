@@ -2,7 +2,9 @@ import { resolveConfig } from "./config.js";
 import { createMemoryRunner } from "./runner.js";
 import { registerSetupTools } from "./setup-tools.js";
 import { registerGraphTools } from "./graph-tools.js";
-import { registerMemoryTools } from "./memory-tools.js";
+import { registerMemoryReadTools } from "./memory-read-tools.js";
+import { registerMemoryWriteTools } from "./memory-write-tools.js";
+import { registerMemoryMaintenanceTools } from "./memory-maintenance-tools.js";
 import { registerContractTools } from "./contract-tools.js";
 import { registerPolicyTools } from "./policy-tools.js";
 import { createSignals } from "./signals.js";
@@ -19,7 +21,9 @@ export default function ompRsi(pi) {
 
   registerSetupTools(pi, config);
   registerGraphTools(pi, config);
-  registerMemoryTools(pi, config, { memory });
+  registerMemoryReadTools(pi, { memory });
+  registerMemoryWriteTools(pi, config, { memory });
+  registerMemoryMaintenanceTools(pi, { memory });
   registerContractTools(pi, config, { memory, rsi });
   registerPolicyTools(pi, config, { memory });
   registerRsiTool(pi, config, rsi);
