@@ -14,7 +14,7 @@ export default function ompRsi(pi) {
   const config = resolveConfig();
   const memory = createMemoryRunner(config);
   const signals = createSignals(pi, config);
-  const discover = createDiscovery(config);
+  const discover = createDiscovery(config, pi);
   const rsi = createRsiRuntime(config, { memory, signals, discover });
 
   registerSetupTools(pi, config);

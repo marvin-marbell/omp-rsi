@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerPrompt } from "../src/prompt.js";
+import { createDiscovery } from "../src/discovery.js";
 import { createSessionSignals } from "../lib/rsi-signals.js";
 import { projectSource } from "../lib/rsi-learning-data.js";
 import { createInstructionSourceDiscovery } from "../lib/rsi-source-discovery.js";
@@ -50,7 +51,7 @@ test("OMP observations project as metadata reports without leaking tool input or
   assert.doesNotMatch(JSON.stringify(units), /INPUT_SECRET|OUTPUT_SECRET/);
 });
 
-test("automatic audit exposes incomplete skill coverage instead of implying a full-stack review", async t => {
+test("automatic audit reports unavailable skill catalog as incomplete", async t => {
   const base = fixture(t);
   const instructions = join(base, "instructions.txt");
   writeFileSync(instructions, "Owner instruction\n");
@@ -59,6 +60,26 @@ test("automatic audit exposes incomplete skill coverage instead of implying a fu
   const result = await discover(ctx);
   assert.equal(result.discovery.complete, false);
   assert.ok(result.members.some(member => member.body.includes("Owner instruction")));
-  assert.ok(result.discovery.classes.find(item => item.kind === "skill").errors.some(error => error.code === "SKILL_BODY_UNAVAILABLE"));
+  assert.ok(result.discovery.classes.find(item => item.kind === "skill").errors.some(error => error.code === "SERVICE_UNAVAILABLE"));
   assert.equal(result.members.filter(member => member.id.startsWith("skill:")).length, 0);
+});
+
+test("automatic audit captures visible active skill bodies and excludes hidden skills", async t => {
+  const base = fixture(t);
+  const visible = join(base, "visible.txt");
+  const hidden = join(base, "hidden.txt");
+  writeFileSync(visible, "---\nname: public-skill\n---\n\nExact model-visible skill body.\n");
+  writeFileSync(hidden, "Hidden skill body.\n");
+  const pi = { pi: { getActiveSkills: () => [
+    { name: "public-skill", filePath: visible, containRoot: base, hide: false },
+    { name: "hidden-skill", filePath: hidden, containRoot: base, hide: true },
+  ] } };
+  const discover = createDiscovery({ rsiInstructionDiscoveryEnabled: true, instructionFiles: [] }, pi);
+  const ctx = { getSystemPrompt: () => ["Host prompt"], sessionManager: { getSessionId: () => "session-1" } };
+  const result = await discover(ctx);
+  const skills = result.members.filter(member => member.class_id === "skills-active");
+  assert.deepEqual(skills.map(member => member.body), ["Exact model-visible skill body."]);
+  assert.equal(result.discovery.complete, true);
+  assert.equal(result.discovery.agent_scoped, false);
+  assert.equal(result.discovery.classes.find(item => item.kind === "skill").user_only_excluded, 1);
 });
