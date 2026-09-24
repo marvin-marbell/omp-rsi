@@ -13,6 +13,23 @@ export function createPlanSession(pi, memory) {
 	let generation = 0;
 	const sessionId = ctx => ctx?.sessionManager?.getSessionId?.();
 	const readPlan = id => memory(["plan", "--request", "-"], { stdin: JSON.stringify({ action: "read", plan_id: id }) });
+	const stateFor = session => {
+		let state = current.get(session);
+		if (!state) {
+			state = { planId: undefined, epoch: 0 };
+			current.set(session, state);
+		}
+		return state;
+	};
+	const capture = ctx => {
+		const session = sessionId(ctx);
+		if (typeof session !== "string" || !session) return null;
+		const state = stateFor(session);
+		return { session, generation, state, epoch: state.epoch };
+	};
+	const isCurrent = (token, ctx) => token.generation === generation && sessionId(ctx) === token.session
+		&& current.get(token.session) === token.state
+		&& token.state.epoch === token.epoch;
 	const restore = ctx => {
 		generation++;
 		const id = sessionId(ctx);
@@ -20,34 +37,45 @@ export function createPlanSession(pi, memory) {
 		const branch = ctx.sessionManager.getBranch?.();
 		if (!Array.isArray(branch)) { current.delete(id); return; }
 		const entry = branch.filter(item => item?.type === "custom" && item.customType === SESSION_ENTRY).at(-1);
-		if (entry && (entry.data?.plan_id === null || validPlanId(entry.data?.plan_id))) current.set(id, entry.data.plan_id);
-		else current.delete(id);
+		const state = stateFor(id);
+		state.epoch++;
+		state.planId = entry && (entry.data?.plan_id === null || validPlanId(entry.data?.plan_id))
+			? entry.data.plan_id : undefined;
 	};
 	for (const event of ["session_start", "session_switch", "session_branch", "session_tree"]) pi.on(event, (_event, ctx) => restore(ctx));
 	pi.on("session_shutdown", (_event, ctx) => { current.delete(sessionId(ctx)); generation++; });
-	async function bind(id, ctx) {
-		const session = sessionId(ctx), token = generation;
-		if (typeof session !== "string" || !session || typeof pi.appendEntry !== "function") throw new Error("Current-plan binding requires a persistent OMP session");
+	async function bind(id, ctx, pending) {
+		const session = sessionId(ctx);
+		if (typeof session !== "string" || !session || typeof pi.appendEntry !== "function") {
+			throw new Error("Current-plan binding requires a persistent OMP session");
+		}
 		if (id !== null && !validPlanId(id)) throw new Error("Invalid plan ID");
+		const token = pending ?? capture(ctx);
+		if (!token || !isCurrent(token, ctx)) throw new Error("Session changed before plan binding; plan remains saved but was not bound");
+		// Reserve the decision before the backend read; a later bind or unbind wins.
+		token.state.epoch++;
+		const operation = { ...token, epoch: token.state.epoch };
 		if (id !== null) await readPlan(id);
-		if (token !== generation || sessionId(ctx) !== session) throw new Error("Session changed before plan binding; plan remains saved but was not bound");
+		if (!isCurrent(operation, ctx)) throw new Error("Session changed before plan binding or binding superseded; plan remains saved but was not bound");
 		pi.appendEntry(SESSION_ENTRY, { plan_id: id });
-		current.set(session, id);
+		operation.state.planId = id;
 		return { plan_id: id, bound: id !== null, scope: "current-session-branch", persisted: true };
 	}
 	async function snapshot(ctx) {
-		const session = sessionId(ctx), token = generation, id = current.get(session);
+		const session = sessionId(ctx), state = current.get(session);
+		const id = state?.planId;
 		if (!id) return null;
+		const token = { session, generation, state, epoch: state.epoch };
 		try {
 			const entry = JSON.parse(await readPlan(id));
-			if (token !== generation || sessionId(ctx) !== session) return null;
+			if (!isCurrent(token, ctx) || token.state.planId !== id) return null;
 			return { plan_id: id, revision: entry.revision, complete: entry.validation?.complete === true, template_id: entry.plan?.template?.template_id };
 		} catch {
-			if (token !== generation || sessionId(ctx) !== session) return null;
+			if (!isCurrent(token, ctx) || token.state.planId !== id) return null;
 			return { plan_id: id, unavailable: true };
 		}
 	}
-	return { bind, snapshot };
+	return { bind, snapshot, capture };
 }
 
 /** Register revision-checked plans; the Python CLI remains the contract authority. */
@@ -75,12 +103,13 @@ export function registerContractTools(pi, config, { memory, planSession }) {
 				return textResult(JSON.stringify(await planSession.bind(args.action === "bind" ? request.plan_id : null, ctx)));
 			}
 			const stdin = contractRequestStdin(args.action, args.request, PLAN_ACTIONS.filter(action => !["bind", "unbind"].includes(action)));
+			const pendingBinding = ["create", "amend"].includes(args.action) && planSession ? planSession.capture(ctx) : null;
 			const result = await memory(contractCliArgs("plan", args), { stdin, signal });
 			if (!["create", "amend"].includes(args.action)) return textResult(result);
 			const saved = JSON.parse(result);
 			// The new or successor plan has been saved; only an explicit RSI action can disclose it remotely.
-			if (planSession && ctx?.sessionManager?.getSessionId?.()) {
-				try { saved.session_binding = await planSession.bind(saved.plan.plan_id, ctx); }
+			if (pendingBinding) {
+				try { saved.session_binding = await planSession.bind(saved.plan.plan_id, ctx, pendingBinding); }
 				catch { saved.session_binding = { bound: false, reason: "Plan saved; bind explicitly in the current session." }; }
 			}
 			return textResult(contractCreateOutput(saved));

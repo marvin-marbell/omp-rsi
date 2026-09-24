@@ -81,6 +81,153 @@ test("current plan handle survives a branch resume and never crosses a switched 
   unblock();
   await assert.rejects(stale, /Session changed before plan binding/);
   assert.equal(branches.get("two").length, 0);
+  session = "one";
+  handlers.get("session_switch")({}, ctx);
+  handlers.get("session_branch")({}, ctx);
+  assert.equal((await plans.snapshot(ctx)).plan_id, "work-one");
+  handlers.get("session_shutdown")({}, ctx);
+  assert.equal(await plans.snapshot(ctx), null);
+  handlers.get("session_start")({}, ctx);
+  assert.equal((await plans.snapshot(ctx)).plan_id, "work-one");
+});
+
+test("the last explicit binding decision wins delayed reads and the current prompt follows it", async t => {
+  const base = fixture(t);
+  const handlers = new Map(), branch = [];
+  const ctx = { sessionManager: { getSessionId: () => "one", getBranch: () => branch } };
+  const string = { describe() { return this; }, optional() { return this; } };
+  let tool, held;
+  const pi = {
+    zod: { string: () => string, boolean: () => string, object: value => value },
+    on(name, handler) { handlers.set(name, handler); },
+    registerTool(value) { tool = value; },
+    appendEntry(customType, data) { branch.push({ type: "custom", customType, data }); },
+  };
+  const memory = async (_argv, { stdin }) => {
+    const request = JSON.parse(stdin);
+    assert.equal(request.action, "read");
+    if (held?.id === request.plan_id) {
+      const gate = held;
+      held = undefined;
+      gate.enter();
+      await gate.wait;
+    }
+    return JSON.stringify({ revision: "r1", plan: { template: { template_id: "coding" } }, validation: { complete: false } });
+  };
+  const pauseRead = id => {
+    let enter, release;
+    const entered = new Promise(resolve => { enter = resolve; });
+    const wait = new Promise(resolve => { release = resolve; });
+    held = { id, enter, wait };
+    return { entered, release };
+  };
+  const plans = createPlanSession(pi, memory);
+  registerContractTools(pi, {}, { memory, planSession: plans });
+  registerPrompt(pi, { base }, plans);
+  const invoke = (action, plan_id) => tool.execute("call", {
+    action, request: plan_id === undefined ? "{}" : JSON.stringify({ plan_id }),
+  }, undefined, undefined, ctx);
+  const prompt = () => handlers.get("before_agent_start")({ systemPrompt: ["Host"] }, ctx);
+  const boundId = async () => {
+    const prepared = await prompt();
+    return prepared.systemPrompt.find(section => section.includes("<!-- omp-rsi:current-plan:begin -->"));
+  };
+
+  const slow = pauseRead("older");
+  const older = invoke("bind", "older");
+  await slow.entered;
+  assert.equal(JSON.parse((await invoke("unbind")).content[0].text).persisted, true);
+  slow.release();
+  await assert.rejects(older, /superseded/);
+  assert.deepEqual(branch.map(entry => entry.data), [{ plan_id: null }]);
+  assert.equal(await boundId(), undefined);
+
+  const delayed = pauseRead("second");
+  const second = invoke("bind", "second");
+  await delayed.entered;
+  await invoke("bind", "latest");
+  delayed.release();
+  await assert.rejects(second, /superseded/);
+  assert.deepEqual(branch.map(entry => entry.data), [{ plan_id: null }, { plan_id: "latest" }]);
+  assert.match(await boundId(), /Current bound plan latest, revision r1/);
+
+  const snapshotGate = pauseRead("latest");
+  const stalePrompt = prompt();
+  await snapshotGate.entered;
+  await invoke("bind", "recovery");
+  snapshotGate.release();
+  const stale = await stalePrompt;
+  assert.equal(stale.systemPrompt.some(section => section.includes("<!-- omp-rsi:current-plan:begin -->")), false);
+  assert.match(await boundId(), /Current bound plan recovery, revision r1/);
+
+  const unbindGate = pauseRead("recovery");
+  const staleAfterUnbind = prompt();
+  await unbindGate.entered;
+  await invoke("unbind");
+  unbindGate.release();
+  assert.equal((await staleAfterUnbind).systemPrompt.some(section => section.includes("<!-- omp-rsi:current-plan:begin -->")), false);
+  assert.equal(await boundId(), undefined);
+  await invoke("bind", "valid-again");
+  assert.deepEqual(branch.at(-1).data, { plan_id: "valid-again" });
+  assert.match(await boundId(), /Current bound plan valid-again, revision r1/);
+});
+
+test("create and amend cannot auto-bind a plan after a binding or session change", async () => {
+  const handlers = new Map(), branches = new Map([["one", []], ["two", []]]);
+  let session = "one", tool, held;
+  const ctx = { sessionManager: { getSessionId: () => session, getBranch: () => branches.get(session) } };
+  const string = { describe() { return this; }, optional() { return this; } };
+  const pi = {
+    zod: { string: () => string, boolean: () => string, object: value => value },
+    on(name, handler) { handlers.set(name, handler); },
+    registerTool(value) { tool = value; },
+    appendEntry(customType, data) { branches.get(session).push({ type: "custom", customType, data }); },
+  };
+  const memory = async (_argv, { stdin }) => {
+    const { action } = JSON.parse(stdin);
+    if (action === held?.action) {
+      const gate = held;
+      held = undefined;
+      gate.enter();
+      await gate.wait;
+    }
+    return action === "read"
+      ? JSON.stringify({ revision: "r1", plan: { template: { template_id: "coding" } }, validation: { complete: false } })
+      : JSON.stringify({ plan: { plan_id: `${action}-plan` }, path: "/memory/plans/plan.md", revision: "r1", persistence: { saved: true } });
+  };
+  const pause = action => {
+    let enter, release;
+    const entered = new Promise(resolve => { enter = resolve; });
+    const wait = new Promise(resolve => { release = resolve; });
+    held = { action, enter, wait };
+    return { entered, release };
+  };
+  const plans = createPlanSession(pi, memory);
+  registerContractTools(pi, {}, { memory, planSession: plans });
+  const invoke = action => tool.execute("call", { action, request: "{}" }, undefined, undefined, ctx);
+
+  const createGate = pause("create");
+  const creating = invoke("create");
+  await createGate.entered;
+  session = "two";
+  handlers.get("session_switch")({}, ctx);
+  createGate.release();
+  assert.equal(JSON.parse((await creating).content[0].text).session_binding.bound, false);
+  assert.deepEqual(branches.get("one"), []);
+  assert.deepEqual(branches.get("two"), []);
+
+  session = "one";
+  handlers.get("session_switch")({}, ctx);
+  const amendGate = pause("amend");
+  const amending = invoke("amend");
+  await amendGate.entered;
+  await invoke("unbind");
+  amendGate.release();
+  assert.equal(JSON.parse((await amending).content[0].text).session_binding.bound, false);
+  assert.deepEqual(branches.get("one").map(entry => entry.data), [{ plan_id: null }]);
+  await invoke("create");
+  assert.deepEqual(branches.get("one").at(-1).data, { plan_id: "create-plan" });
+  assert.deepEqual(branches.get("two"), []);
 });
 
 test("creating or amending a plan never invokes remote preflight even when TypeSafe is enabled", async () => {
