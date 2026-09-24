@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createLearning } from "../lib/rsi-learning.js";
+import { createRsi } from "../lib/rsi.js";
 import { digest, mappingKey, projectSource, independentSources, bytes, PROJECTION_VERSION } from "../lib/rsi-learning-data.js";
 import { LEARNING_VERSION, mapQuestions, mapFeature, learningIdentity, FRAME } from "../lib/rsi-learning-rubric.js";
 
@@ -15,7 +16,7 @@ function plan(id = "job", text = "The regression test caught a stale write and t
 	return { plan_id: id, revision: revision(value), plan: value, validation: { complete: true } };
 }
 function answers(questions, overrides = {}) {
-	const defaults = { mechanism: "verification-design", evidence_status: "observed", signal: "failure", destination: "policy", ambiguity: "clear", generality: "cross-task", sufficiency: "supported", operation: "rewrite", novelty: "covered" };
+	const defaults = { mechanism: "verification-design", evidence_status: "observed", signal: "failure", destination: "policy", attribution: "unknown", ambiguity: "clear", generality: "cross-task", sufficiency: "supported", operation: "rewrite", novelty: "covered" };
 	return Object.fromEntries(Object.entries(questions).map(([id, q]) => {
 		if (q.type === "score") return [id, { type: "score", score: 2, confidence: 0.8 }];
 		const selected = overrides[id] ?? (id === "witness" ? Object.keys(q.criteria).find(k => q.criteria[k]?.path?.endsWith(".summary")) ?? "none" : id === "target_section" ? Object.keys(q.criteria)[1] ?? "none" : defaults[id]);
@@ -64,8 +65,111 @@ function fixture(options = {}) {
 	};
 	return { plans, artifacts, requests, assessed, local, assess, learning: createLearning({ local, assess, config: { ...config, ...options.config } }), setPolicy: value => { policy = value; } };
 }
-const mine = (f, fields = {}) => f.learning.mine({ kind: "plans", source_ids: [...f.plans.keys()], ...fields }, { no_git: true }, exec);
+async function confirmedMine(f, fields, learning = f.learning) {
+	const all = fields.kind === "plans" ? [...f.plans.keys()] : [...f.artifacts.values()].filter(a => a.kind === "observation").map(a => a.id);
+	const selected = fields.source_ids ?? all.sort().filter(id => id > (fields.after ?? "")).slice(0, fields.limit ?? 4);
+	const confirmations = [...(fields.confirmations ?? [])];
+	for (const id of selected) {
+		const payload = fields.kind === "plans" ? f.plans.get(id) : f.artifacts.get(id);
+		if (!payload) continue;
+		const source = { kind: fields.kind === "plans" ? "plan" : "observation", id, revision: payload.revision };
+		for (const state of projectSource(source, payload)) {
+			const preview = await learning.preview({ kind: fields.kind, source_id: id, unit: state.unit });
+			confirmations.push(preview.confirmation);
+		}
+	}
+	return learning.mine({ ...fields, confirmations }, { no_git: true }, exec);
+}
+const mine = (f, fields = {}) => confirmedMine(f, { kind: "plans", source_ids: [...f.plans.keys()], ...fields });
 const mapIds = result => result.receipts.filter(r => r.status === "assessed").map(r => r.id);
+
+test("selected PR review adapter binds one head, stays local, and maps stale approval without blaming agent", async () => {
+	const f = fixture();
+	let remoteCalls = 0;
+	const rsi = createRsi({ typesafeEnabled: false }, {
+		memory: async (_argv, { stdin }) => JSON.stringify(await f.local(JSON.parse(stdin))),
+		evaluate: async () => { remoteCalls++; throw new Error("unexpected remote request"); },
+	});
+	const fields = { plan_id: "job", repository: "marvin-marbell/omp-rsi", pr_number: 23,
+		head_sha: "b".repeat(40), review_id: 123, review_commit: "a".repeat(40),
+		review_state: "APPROVED", summary: "Reviewed predecessor commit; head changed afterward." };
+	await assert.rejects(rsi.run("review_observe", { ...fields, summary: "x".repeat(501) }), /summary/);
+	const saved = await rsi.run("review_observe", fields, { no_git: true });
+	assert.equal(saved.network_called, false);
+	assert.equal(remoteCalls, 0);
+	const artifact = f.artifacts.get(saved.receipt.id);
+	assert.deepEqual(artifact.bindings.plans, [{ plan_id: "job", revision: f.plans.get("job").revision }]);
+	const [state] = projectSource({ kind: "observation", id: artifact.id, revision: artifact.revision }, artifact);
+	assert.equal(state.report.type, "pr-review-event");
+	assert.equal(state.report.head_matches_review, false);
+	assert.ok(state.evidence_rows.some(row => row.path === "observation.data.pr_review.summary" && row.quote === fields.summary));
+	const feature = mapFeature({ id: "map-review", revision: "r1", bindings: artifact.bindings,
+		data: { state, assessment: { response: { answers: answers(mapQuestions(state), { attribution: "agent_omission" }) } } } });
+	assert.equal(feature.attribution, "unknown");
+	assert.equal(feature.evidence_status, "unreviewed");
+	assert.equal(independentSources([feature, { ...feature, source_key: "plan:job", source_family_keys: ["plan:job"] }]), 1);
+	const privateBody = "PRIVATE_REVIEW_PAYLOAD_NOT_SELECTED";
+	artifact.data.pr_review.private_body = privateBody;
+	artifact.data.unselected_extension = { private_body: privateBody };
+	artifact.revision = revision(artifact.data);
+	const preview = await f.learning.preview({ kind: "observations", source_id: artifact.id });
+	const mapped = await f.learning.mine({ kind: "observations", source_ids: [artifact.id], confirmations: [preview.confirmation] });
+	assert.equal(mapped.status, "complete");
+	assert.equal(f.assessed[0].state.report.type, "pr-review-event");
+	assert.doesNotMatch(JSON.stringify(f.assessed[0].state), /PRIVATE_REVIEW_PAYLOAD_NOT_SELECTED/);
+	artifact.data = { wrapper: { pr_review: { private_body: privateBody } } };
+	artifact.revision = revision(artifact.data);
+	await assert.rejects(f.learning.preview({ kind: "observations", source_id: artifact.id }), /Nested selected review\/retrieval observation/);
+});
+
+test("selected retrieval hashes a real entry revision locally but excludes its private path and body from remote projection", async () => {
+	const privatePath = "shared/knowledge/private-topic.md";
+	const f = fixture({ local: request => request.action === "entry_snapshot"
+		? { path: privatePath, revision: `sha256:${"e".repeat(64)}`, bytes: 843, content_retained: false } : undefined });
+	let remoteCalls = 0;
+	const rsi = createRsi({ typesafeEnabled: false }, {
+		memory: async (_argv, { stdin }) => JSON.stringify(await f.local(JSON.parse(stdin))),
+		evaluate: async () => { remoteCalls++; throw new Error("unexpected remote request"); },
+	});
+	const saved = await rsi.run("retrieval_observe", { plan_id: "job", entry_path: privatePath,
+		outcome: "contradicted", summary: "The selected earlier entry conflicted with the corrected retrieval." }, { no_git: true });
+	assert.equal(saved.network_called, false);
+	assert.equal(saved.entry_retrieval.revision, `sha256:${"e".repeat(64)}`);
+	assert.equal(f.artifacts.get(saved.receipt.id).data.entry_retrieval.path, privatePath);
+	const preview = await f.learning.preview({ kind: "observations", source_id: saved.receipt.id });
+	assert.equal(preview.state.report.type, "memory-retrieval");
+	assert.equal(preview.network_called, false);
+	assert.equal(remoteCalls, 0);
+	assert.doesNotMatch(JSON.stringify(preview.state), /private-topic/);
+	assert.ok(preview.state.evidence_rows.some(row => row.path === "observation.data.entry_retrieval.summary"));
+	const feature = mapFeature({ id: "map-memory", revision: "r1", bindings: f.artifacts.get(saved.receipt.id).bindings,
+		data: { state: preview.state, assessment: { response: { answers: answers(mapQuestions(preview.state), { attribution: "agent_omission" }) } } } });
+	assert.equal(feature.attribution, "unknown");
+	assert.equal(feature.evidence_status, "unreviewed");
+	const normal = await f.learning.mine({ kind: "observations", source_ids: [saved.receipt.id], confirmations: [preview.confirmation] });
+	assert.equal(normal.status, "complete");
+	assert.equal(f.assessed[0].state.report.type, "memory-retrieval");
+	const stored = f.artifacts.get(saved.receipt.id);
+	stored.data.entry_retrieval.source_kind = privatePath;
+	stored.data.unselected_extension = { private_path: privatePath };
+	stored.revision = revision(stored.data);
+	const extended = await f.learning.preview({ kind: "observations", source_id: saved.receipt.id });
+	const mapped = await f.learning.mine({ kind: "observations", source_ids: [saved.receipt.id], confirmations: [extended.confirmation] });
+	assert.equal(mapped.status, "complete");
+	assert.equal(mapped.calls, 1);
+	assert.equal(f.assessed[1].state.coverage.projection_mode, "selected-memory-retrieval");
+	assert.doesNotMatch(JSON.stringify(f.assessed[1]), /private-topic/);
+	for (const invalid of [null, "private path", { path: privatePath }, { ...stored.data.entry_retrieval, path: { private_path: privatePath } }]) {
+		stored.data.entry_retrieval = invalid;
+		stored.revision = revision(stored.data);
+		await assert.rejects(f.learning.mine({ kind: "observations", source_ids: [saved.receipt.id], confirmations: [extended.confirmation] }), /Unsupported entry_retrieval observation shape/);
+	}
+	delete stored.data.entry_retrieval;
+	stored.data.nested = { entry_retrieval: { path: privatePath } };
+	stored.revision = revision(stored.data);
+	await assert.rejects(f.learning.mine({ kind: "observations", source_ids: [saved.receipt.id], confirmations: [extended.confirmation] }), /Nested selected review\/retrieval observation is unsupported/);
+	assert.equal(f.assessed.length, 2);
+});
 
 test("safe validation detail survives failed map receipts and unavailable reductions", async () => {
 	let fail = true;
@@ -100,7 +204,7 @@ function observedTools(note = "Selected review finding, still an author hypothes
 test("known live-shaped telemetry yields one unreviewed note plus three coherent tool units, not scalar metadata batches", async () => {
 	const observation = observedTools();
 	const f = fixture(); f.artifacts.set(observation.id, observation);
-	const result = await f.learning.mine({ kind: "observations", source_ids: [observation.id] });
+	const result = await confirmedMine(f, { kind: "observations", source_ids: [observation.id] });
 	assert.equal(result.status, "complete"); assert.equal(result.calls, 4);
 	assert.equal(result.coverage.sources[0].units_total, 4);
 	const states = f.assessed.map(value => value.state);
@@ -195,7 +299,7 @@ test("historical generic observation note witnesses remain unreviewed even with 
 	const observation = observedTools(); observation.data.telemetry.schema = "unknown";
 	const f = fixture({ answers: state => state.evidence_rows ? { witness: state.evidence_rows.find(row => row.path === "observation.data.context_note")?.id ?? "none" } : {} });
 	f.artifacts.set(observation.id, observation);
-	const mapped = await f.learning.mine({ kind: "observations", source_ids: [observation.id], max_calls: 1 });
+	const mapped = await confirmedMine(f, { kind: "observations", source_ids: [observation.id], max_calls: 1 });
 	const artifact = f.artifacts.get(mapped.receipts[0].id);
 	assert.equal(artifact.data.state.report.type, "observation");
 	assert.equal(mapFeature(artifact).model_evidence_status, "observed");
@@ -204,7 +308,7 @@ test("historical generic observation note witnesses remain unreviewed even with 
 
 test("unit cursor binds exact projection plus question rubric and rejects legacy nonzero or changed projection", async () => {
 	const observation = observedTools(); const f = fixture(); f.artifacts.set(observation.id, observation);
-	const first = await f.learning.mine({ kind: "observations", source_ids: [observation.id], max_calls: 1 });
+	const first = await confirmedMine(f, { kind: "observations", source_ids: [observation.id], max_calls: 1 });
 	assert.equal(first.resume.cursor.unit, 1); assert.match(first.resume.cursor.projection, /^[a-f0-9]{64}$/);
 	const units = projectSource({ kind: "observation", id: observation.id, revision: observation.revision }, observation);
 	assert.equal(first.resume.cursor.projection, digest({ version: PROJECTION_VERSION, rubric: LEARNING_VERSION, requested_model: "jev-latest", endpoint: "https://api.typesafe.ai/v1/systemone", units: units.map(state => ({ state: digest(state), questions: learningIdentity(mapQuestions(state)).sha256 })) }));
@@ -244,7 +348,7 @@ test("later-source unit-zero cursors cannot omit their selection binding or sile
 test("paged resume rejects changed page identities or paging parameters instead of skipping new earlier IDs", async () => {
 	const p = plan("job"); p.plan.work_items[0].evidence.push({ ...structuredClone(p.plan.work_items[0].evidence[0]), id: "second" }); p.revision = revision(p.plan);
 	const f = fixture({ plans: [p, plan("z")] });
-	const first = await f.learning.mine({ kind: "plans", limit: 2, max_calls: 1 });
+	const first = await confirmedMine(f, { kind: "plans", limit: 2, max_calls: 1 });
 	for (const change of [{ limit: 3 }, { after: "a" }, { source_ids: ["job", "z"] }]) await assert.rejects(f.learning.mine({ ...first.resume, ...change }), /Selection\/page cursor is stale/);
 	f.plans.set("earlier", plan("earlier"));
 	await assert.rejects(f.learning.mine(first.resume), /Selection\/page cursor is stale/);
@@ -253,10 +357,11 @@ test("paged resume rejects changed page identities or paging parameters instead 
 
 for (const [label, change] of [["requested model", { typesafeModel: "jev-explicit-new" }], ["endpoint", { typesafeEndpoint: "https://other.example/v1/systemone" }]]) test(`resuming with a different ${label} rejects before inference instead of skipping old-semantics units`, async () => {
 	const observation = observedTools(); const f = fixture(); f.artifacts.set(observation.id, observation);
-	const first = await f.learning.mine({ kind: "observations", source_ids: [observation.id], max_calls: 1 });
+	const first = await confirmedMine(f, { kind: "observations", source_ids: [observation.id], max_calls: 1 });
 	const changed = createLearning({ local: f.local, assess: f.assess, config: { ...config, ...change } });
 	const before = f.assessed.length;
-	await assert.rejects(changed.mine(first.resume), /requested model or endpoint changed.*restart/);
+	const fresh = await changed.preview({ kind: "observations", source_id: observation.id, unit: 1 });
+	await assert.rejects(changed.mine({ ...first.resume, confirmations: [fresh.confirmation] }), /requested model or endpoint changed.*restart/);
 	assert.equal(f.assessed.length, before);
 });
 
@@ -347,7 +452,7 @@ test("changed source revision, requested model, endpoint and explicit refresh in
 	assert.notEqual(first.receipts[0].id, changed.receipts[0].id);
 	for (const extra of [{ typesafeModel: "jev-versioned" }, { typesafeEndpoint: "https://other.example/v1/systemone" }]) {
 		const learning = createLearning({ local: f.local, assess: f.assess, config: { ...config, ...extra } });
-		const result = await learning.mine({ kind: "plans", source_ids: ["job"] });
+		const result = await confirmedMine(f, { kind: "plans", source_ids: ["job"] }, learning);
 		assert.notEqual(result.receipts[0].id, changed.receipts[0].id);
 		assert.equal(result.calls, 1);
 	}
@@ -386,9 +491,9 @@ test("quota cursor resumes every source unit without silently dropping reports",
 
 test("page cursors do not claim whole-corpus review", async () => {
 	const f = fixture({ plans: [plan("a"), plan("b")] });
-	const one = await f.learning.mine({ kind: "plans", limit: 1 });
+	const one = await confirmedMine(f, { kind: "plans", limit: 1 });
 	assert.equal(one.has_more, true); assert.equal(one.next_after, "a"); assert.equal(one.coverage.sources_selected, 1);
-	const two = await f.learning.mine({ kind: "plans", after: one.next_after, limit: 1 });
+	const two = await confirmedMine(f, { kind: "plans", after: one.next_after, limit: 1 });
 	assert.equal(two.has_more, false); assert.equal(two.receipts[0].source_id, "b");
 	assert.equal(two.coverage.whole_corpus_reviewed, false);
 });
@@ -420,7 +525,7 @@ test("concurrent miners reuse the immutable winner without losing quota progress
 		assess: (state, questions, attempt) => ({ status: "assessed", response: { model: `jev-attempt-${attempt}`, answers: answers(questions), usage: { input_tokens: 10, output_tokens: 2 }, elapsedMs: 1 } }),
 	});
 	const other = createLearning({ local: f.local, assess: f.assess, config });
-	const results = await Promise.all([mine(f), other.mine({ kind: "plans", source_ids: ["job"] })]);
+	const results = await Promise.all([mine(f), confirmedMine(f, { kind: "plans", source_ids: ["job"] }, other)]);
 	assert.equal(f.artifacts.size, 1);
 	assert.ok(results.every(result => result.status === "complete" && result.coverage.sources[0].units_completed === 1));
 	assert.equal(results[0].receipts[0].id, results[1].receipts[0].id);
@@ -445,9 +550,9 @@ test("only exact immutable-ID conflicts use race lookup; wrapped CLI conflict wo
 		};
 		const racing = createLearning({ local, assess: f.assess, config });
 		if (reuses) {
-			const result = await racing.mine({ kind: "plans", source_ids: ["job"] });
+			const result = await confirmedMine(f, { kind: "plans", source_ids: ["job"] }, racing);
 			assert.equal(result.receipts[0].id, mapped.receipts[0].id); assert.equal(result.receipts[0].race_reused, true);
-		} else { await assert.rejects(racing.mine({ kind: "plans", source_ids: ["job"] }), error => error.message === message); assert.equal(lookups, 1); }
+		} else { await assert.rejects(confirmedMine(f, { kind: "plans", source_ids: ["job"] }, racing), error => error.message === message); assert.equal(lookups, 1); }
 	}
 	const f = fixture(); const mapped = await mine(f);
 	f.artifacts.get(mapped.receipts[0].id).data.state.report_digest = "corrupt";
@@ -457,7 +562,7 @@ test("only exact immutable-ID conflicts use race lookup; wrapped CLI conflict wo
 		if (request.action === "record") throw new Error("immutable RSI artifact ID already exists");
 		return f.local(request);
 	} });
-	await assert.rejects(racing.mine({ kind: "plans", source_ids: ["job"] }), /cache identity mismatch/);
+	await assert.rejects(confirmedMine(f, { kind: "plans", source_ids: ["job"] }, racing), /cache identity mismatch/);
 });
 
 test("lookup errors are not missing cache entries and do not trigger paid retry", async () => {
@@ -473,7 +578,7 @@ test("oversized evidence is losslessly chunked with exact selected spans and exp
 	let fields = { kind: "plans", source_ids: ["huge"], max_calls: 12 };
 	const rows = [];
 	for (let attempt = 0; attempt < 20; attempt++) {
-		const result = await f.learning.mine(fields);
+		const result = await confirmedMine(f, fields);
 		for (const receipt of result.receipts) rows.push(...f.artifacts.get(receipt.id).data.state.evidence_rows.filter(r => r.path.endsWith(".summary")));
 		if (!result.resume) break;
 		fields = result.resume;
@@ -486,7 +591,7 @@ test("oversized evidence is losslessly chunked with exact selected spans and exp
 
 test("unloadable oversized source returns explicit uncovered source and retry instructions", async () => {
 	const f = fixture({ local: request => { if (request.action === "context") throw new Error("private context byte budget detail"); } });
-	const result = await mine(f);
+	const result = await f.learning.mine({ kind: "plans", source_ids: ["job"] });
 	assert.equal(result.status, "unavailable"); assert.equal(result.calls, 0);
 	assert.equal(result.coverage.selected_page_complete, false);
 	assert.equal(result.coverage.sources[0].units_total, null);
@@ -533,6 +638,9 @@ test("review history, latest rejection, exceptions and template pin remain expli
 	const state = f.assessed[0].state;
 	assert.equal(state.report.latest_review, "rejected");
 	assert.equal(state.context.template_pin.revision, "pinned-template");
+	assert.equal(state.report.review_count, 2);
+	assert.equal(state.coverage.projection_mode, "plan-report-units");
+	assert.equal(mapFeature(f.artifacts.get(result.receipts[0].id)).attribution, "unknown");
 	assert.match(JSON.stringify(state.evidence_rows), /accepted.*rejected|rejected.*accepted/);
 	const reduced = await f.learning.reduce({ artifact_ids: mapIds(result) });
 	assert.equal(reduced.issues[0].counts.evidence_status.unreviewed, 2);
@@ -557,7 +665,7 @@ test("plan reports and observations bound to that plan remain one dependent sour
 	observation.bindings.plans = [{ plan_id: "job", revision: f.plans.get("job").revision }];
 	f.artifacts.set(observation.id, observation);
 	const planned = await mine(f);
-	const observed = await f.learning.mine({ kind: "observations", source_ids: [observation.id] });
+	const observed = await confirmedMine(f, { kind: "observations", source_ids: [observation.id] });
 	const result = await f.learning.reduce({ artifact_ids: [...mapIds(planned), ...mapIds(observed)] });
 	assert.equal(result.issues[0].independent_source_count, 1);
 	assert.equal(result.issues[0].counts.source_ids, 2);
@@ -710,7 +818,7 @@ test("observations retain numeric metadata and shared session sources deduplicat
 		const a = { id: `observation-${i}`, kind: "observation", revision: `obs-v${i}`, bindings: { policy_revision: "old-policy", plans: [] }, data: { source: { session_marker: "same-session" }, totals: { failed: i + 2 }, note: "Transport failed; cause unknown" } };
 		f.artifacts.set(a.id, a);
 	}
-	const mapped = await f.learning.mine({ kind: "observations", source_ids: ["observation-0", "observation-1"] });
+	const mapped = await confirmedMine(f, { kind: "observations", source_ids: ["observation-0", "observation-1"] });
 	assert.equal(f.assessed[0].state.evidence_rows.find(row => row.path.endsWith(".failed")).quote, "2");
 	const result = await f.learning.reduce({ artifact_ids: mapIds(mapped) });
 	assert.equal(result.issues[0].independent_source_count, 1);
@@ -829,8 +937,181 @@ test("observation telemetry wrapper keeps exact session-family identity even whe
 		const a = { id: `wrapped-${i}`, kind: "observation", revision: `rev${i}`, bindings: { policy_revision: "policy-v1", plans: [] }, data: { telemetry: { source: { session_marker: "opaque-session" }, totals: { failed: i + 1 }, coverage: { omitted: i } }, context_note: "selected context ".repeat(150), note_provenance: "hypothesis" } };
 		f.artifacts.set(a.id, a);
 	}
-	const mapped = await f.learning.mine({ kind: "observations", source_ids: ["wrapped-0", "wrapped-1"], max_calls: 12 });
+	const mapped = await confirmedMine(f, { kind: "observations", source_ids: ["wrapped-0", "wrapped-1"], max_calls: 12 });
 	const result = await f.learning.reduce({ artifact_ids: mapIds(mapped) });
 	assert.equal(result.issues[0].independent_source_count, 1);
 	assert.ok(f.assessed.slice(0, mapped.calls).every(a => a.state.context.session_marker === "opaque-session"));
+});
+
+test("schema-2 trajectory mine and reduce separates omission, external change, template and retrieval outcomes without duplicate votes", async () => {
+	const event = (id, kind, source, cause, summary, before, after) => ({
+		id, kind, at: `2026-09-23T00:00:${String(id.length).padStart(2, "0")}Z`, actor: "agent",
+		source, reference: `review/${id}`, summary, before, after, cause,
+	});
+	const omission = plan("omission");
+	omission.plan.schema = 2;
+	omission.plan.phase = "planning"; omission.plan.steps = [];
+	omission.plan.timeline = [
+		event("round-one", "review_feedback", "pr_review", "agent_omission", "First correction: agent omitted the required stale-write check.", "check missing", "check added"),
+		event("round-two", "review_feedback", "pr_review", "agent_omission", "Second correction: agent omitted the recovery scenario.", "recovery missing", "recovery added"),
+		event("bad-template", "steering", "user", "agent_omission", "Pinned template did not instruct a recovery probe and agent omitted it.", "probe absent", "probe added"),
+		event("stale-memory", "retrieval", "memory", "unknown", "Retrieved a stale memory note about the release.", "stale indexed note", "source inspected"),
+		event("corrected-memory", "retrieval", "memory", "none", "Corrected retrieval found the current source and the task succeeded.", "stale note", "current source"),
+		event("positive-control", "review_feedback", "pr_review", "none", "Positive control: reviewer confirmed the adverse transition was tested.", "test planned", "test observed"),
+	];
+	omission.revision = revision(omission.plan);
+	const external = plan("external");
+	external.plan.schema = 2;
+	external.plan.phase = "planning"; external.plan.steps = [];
+	external.plan.timeline = [
+		event("scope-one", "external_change", "external", "external_change", "Customer changed the required behavior after implementation.", "original scope", "new scope"),
+		event("scope-two", "external_change", "external", "external_change", "Second round was a newly introduced external constraint.", "initial constraint", "new constraint"),
+		event("good-template", "steering", "user", "none", "Pinned template prompted a useful adverse case before implementation.", "adverse case planned", "adverse case checked"),
+	];
+	external.revision = revision(external.plan);
+	const f = fixture({ plans: [omission, external], answers: state => {
+		if (state.source) {
+			const r = state.report, id = r.id;
+			const route = id === "bad-template" ? ["context-and-scope", "template", "failure"]
+				: id === "good-template" ? ["context-and-scope", "no-change", "success"]
+				: id === "stale-memory" ? ["knowledge-reuse", "retrieval", "failure"]
+				: id === "corrected-memory" ? ["knowledge-reuse", "retrieval", "success"]
+				: id === "positive-control" ? ["evidence-integrity", "no-change", "success"]
+				: r.type === "timeline-event" ? ["verification-design", r.cause_claim === "external_change" ? "no-change" : "template", "failure"]
+				: ["uncertain", "no-change", "uncertain"];
+			return { mechanism: route[0], destination: route[1], signal: route[2],
+				attribution: r.type === "timeline-event" ? r.cause_claim : "unknown",
+				witness: state.evidence_rows.find(row => row.path.endsWith(".summary"))?.id ?? "none" };
+		}
+		const routed = state.group.witnesses[0].destination;
+		return { destination: routed, sufficiency: "mixed", operation: routed === "no-change" ? "retain" : "other-artifact" };
+	} });
+	let fields = { kind: "plans", source_ids: ["omission", "external"], max_calls: 12 };
+	const mapped = [];
+	do {
+		const result = await confirmedMine(f, fields);
+		mapped.push(...mapIds(result));
+		fields = result.resume;
+	} while (fields);
+	const units = mapped.map(id => f.artifacts.get(id).data.state);
+	assert.ok(units.some(unit => unit.report.type === "template-choice" && unit.evidence_rows.some(row => row.path === "plan.template.template_id")));
+	assert.ok(units.some(unit => unit.report.type === "original-requirement" && unit.evidence_rows.some(row => row.path.endsWith(".description"))));
+	assert.ok(units.some(unit => unit.report.type === "timeline-event" && unit.evidence_rows.some(row => row.path.endsWith(".before"))));
+	assert.ok(units.every(unit => unit.source.revision === f.plans.get(unit.source.id).revision));
+	const externalMap = mapped.find(id => f.artifacts.get(id).data.state.report.id === "scope-one");
+	const misread = structuredClone(f.artifacts.get(externalMap));
+	misread.data.assessment.response.answers.attribution.choice = "agent_omission";
+	assert.equal(mapFeature(misread).attribution, "unknown", "an optimistic model cannot rewrite a recorded external cause");
+	const first = mapped.find(id => f.artifacts.get(id).data.state.report.id === "round-one");
+	const feature = mapFeature(f.artifacts.get(first));
+	assert.equal(feature.attribution, "agent_omission");
+	assert.equal(feature.evidence_status, "unreviewed");
+	assert.equal(feature.witness.quote, omission.plan.timeline[0].summary);
+	assert.equal(feature.report.event_reference, "review/round-one");
+	const refreshed = await confirmedMine(f, { kind: "plans", source_ids: ["omission"], refresh: true, max_calls: 12 });
+	const duplicate = refreshed.receipts.find(receipt => f.artifacts.get(receipt.id).data.state.report.id === "round-one").id;
+	const reduced = await f.learning.reduce({ artifact_ids: [...mapped, duplicate, first], max_issues: 8 });
+	assert.equal(reduced.coverage.duplicate_input_ids, 1);
+	const issue = (mechanism, attribution) => reduced.issues.find(value => value.mechanism === mechanism && value.attribution === attribution);
+	const omitted = issue("verification-design", "agent_omission");
+	const changed = issue("verification-design", "external_change");
+	assert.equal(omitted.owner, "template");
+	assert.equal(omitted.counts.mapped_units, 3);
+	assert.equal(omitted.counts.deduplicated_units, 2);
+	assert.equal(omitted.independent_source_count, 1);
+	assert.equal(changed.owner, "no-change");
+	assert.equal(changed.counts.deduplicated_units, 2);
+	assert.ok(changed.witnesses.every(value => value.attribution === "external_change"));
+	assert.equal(issue("context-and-scope", "agent_omission").owner, "template");
+	assert.equal(issue("context-and-scope", "none").owner, "no-change");
+	assert.equal(issue("knowledge-reuse", "unknown").owner, "retrieval");
+	assert.equal(issue("knowledge-reuse", "none").owner, "retrieval");
+	assert.equal(issue("evidence-integrity", "none").owner, "no-change");
+	assert.ok(reduced.issues.every(value => value.automatic_promotion === false && value.witnesses.every(w => w.source.revision === f.plans.get(w.source.id).revision)));
+});
+
+test("disclosure preview exposes the exact next unit without assessment or persistence", async () => {
+	const p = plan("preview");
+	p.plan.schema = 2; p.plan.phase = "planning"; p.plan.steps = [];
+	p.plan.timeline = [{ id: "correction", kind: "review_feedback", source: "pr_review",
+		reference: "pr/19/review/1", summary: "A bounded selected correction", before: "old", after: "new",
+		cause: "external_change", actor: "agent", at: "2026-09-23T00:00:00Z" }];
+	p.revision = revision(p.plan);
+	const f = fixture({ plans: [p], config: { typesafeEnabled: false } });
+	const preview = await f.learning.preview({ kind: "plans", source_id: "preview", unit: 3 });
+	assert.equal(preview.network_called, false);
+	assert.equal(preview.remote_enabled, false);
+	assert.equal(f.assessed.length, 0);
+	assert.equal(f.artifacts.size, 0);
+	const mapped = await f.learning.mine({ kind: "plans", source_ids: ["preview"], max_calls: 12 });
+	const root = f.artifacts.get(mapped.receipts.find(row => row.unit === 3).id);
+	assert.deepEqual(preview.state, root.data.state);
+	assert.deepEqual(preview.questions, root.data.questions);
+});
+
+test("remote mine pauses without preview, then confirms only the exact unit and resumes after local preview", async () => {
+	const p = plan();
+	p.plan.work_items[0].evidence.push({ ...structuredClone(p.plan.work_items[0].evidence[0]), id: "second", summary: "Another concrete report" });
+	p.revision = revision(p.plan);
+	const f = fixture({ plans: [p] });
+	const fields = { kind: "plans", source_ids: ["job"], max_calls: 2 };
+	const blocked = await f.learning.mine(fields);
+	assert.equal(blocked.status, "confirmation_required");
+	assert.equal(blocked.calls, 0);
+	assert.equal(f.assessed.length, 0);
+	const first = await f.learning.preview({ kind: "plans", source_id: "job", unit: 0 });
+	assert.match(first.confirmation, /^[0-9a-f-]{36}$/);
+	const partial = await f.learning.mine({ ...fields, confirmations: [first.confirmation] });
+	assert.equal(partial.status, "confirmation_required");
+	assert.equal(partial.receipts[0].unit, 0);
+	assert.equal(partial.resume.cursor.unit, 1);
+	assert.equal(f.assessed.length, 1);
+	const second = await f.learning.preview({ kind: "plans", source_id: "job", unit: 1 });
+	const complete = await f.learning.mine({ ...partial.resume, confirmations: [first.confirmation, second.confirmation] });
+	assert.equal(complete.status, "complete");
+	assert.equal(complete.calls, 1);
+	assert.equal(f.assessed.length, 2);
+	const cache = await f.learning.mine(fields);
+	assert.equal(cache.status, "complete");
+	assert.equal(cache.calls, 0);
+	assert.equal(cache.cache_hits, 2);
+});
+
+test("opaque confirmation rejects guessed hashes, changed source revisions and changed projection without inference", async () => {
+	const f = fixture();
+	const preview = await f.learning.preview({ kind: "plans", source_id: "job" });
+	const fields = { kind: "plans", source_ids: ["job"] };
+	await assert.rejects(f.learning.mine({ ...fields, confirmations: [digest(preview.state)] }), /opaque tokens/);
+	assert.equal(f.assessed.length, 0);
+	f.plans.set("job", plan("job", "Changed after preview"));
+	const changedRevision = await f.learning.mine({ ...fields, confirmations: [preview.confirmation] });
+	assert.equal(changedRevision.status, "confirmation_required");
+	assert.equal(changedRevision.calls, 0);
+	assert.equal(f.assessed.length, 0);
+	const current = await f.learning.preview({ kind: "plans", source_id: "job" });
+	f.plans.get("job").plan.work_items[0].evidence[0].summary = "Projection changed without revision update";
+	const changedProjection = await f.learning.mine({ ...fields, confirmations: [current.confirmation] });
+	assert.equal(changedProjection.status, "confirmation_required");
+	assert.equal(changedProjection.calls, 0);
+	assert.equal(f.assessed.length, 0);
+	const renewed = await f.learning.preview({ kind: "plans", source_id: "job" });
+	const confirmed = await f.learning.mine({ ...fields, confirmations: [renewed.confirmation] });
+	assert.equal(confirmed.status, "complete");
+	assert.equal(confirmed.calls, 1);
+	assert.equal(f.assessed.length, 1);
+});
+
+test("page selection requires previews for each page and never assesses the next page on another page token", async () => {
+	const f = fixture({ plans: [plan("a"), plan("b")] });
+	const a = await f.learning.preview({ kind: "plans", source_id: "a" });
+	const first = await f.learning.mine({ kind: "plans", limit: 1, confirmations: [a.confirmation] });
+	assert.equal(first.status, "complete");
+	const next = await f.learning.mine({ kind: "plans", after: first.next_after, limit: 1, confirmations: [a.confirmation] });
+	assert.equal(next.status, "confirmation_required");
+	assert.equal(next.calls, 0);
+	assert.equal(f.assessed.length, 1);
+	const b = await f.learning.preview({ kind: "plans", source_id: "b" });
+	const last = await f.learning.mine({ ...next.resume, confirmations: [b.confirmation] });
+	assert.equal(last.status, "complete");
+	assert.equal(f.assessed.length, 2);
 });

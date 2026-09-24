@@ -1,4 +1,5 @@
 """RSI lifecycle, immutable provenance, lossless boundaries, and stale source tests."""
+import hashlib
 import json
 import os
 import subprocess
@@ -57,6 +58,30 @@ def promote(api, proposal, evaluation, **extra):
     return api({"action": "promote", "proposal_id": proposal["id"], "evaluation_id": evaluation["id"],
                 "expected_revision": proposal["bindings"]["policy_revision"], "review_note": "Self-reported review context",
                 "actor": "agent", **extra})
+
+
+def test_selected_memory_snapshot_hashes_revision_without_disclosing_body(api, tmp_path):
+    path = tmp_path / "shared" / "knowledge" / "entry.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("---\ndescription: Example\n---\nPRIVATE_SOURCE_BODY\n")
+    request = {"action": "entry_snapshot", "path": "shared/knowledge/entry.md"}
+    first = api(request)
+    assert first["revision"] == "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    assert first["content_retained"] is False
+    assert "PRIVATE_SOURCE_BODY" not in json.dumps(first)
+    path.write_text("---\ndescription: Example\n---\nCorrected knowledge\n")
+    assert api(request)["revision"] != first["revision"]
+    path.write_text("not an ordinary memory entry\n")
+    with pytest.raises(ContractError, match="valid frontmatter"):
+        api(request)
+    with pytest.raises(ContractError):
+        api({**request, "path": "shared/plans/entry.md"})
+    with pytest.raises(ContractError):
+        api({**request, "path": "shared/knowledge/../../../outside.md"})
+    linked = path.with_name("linked.md")
+    linked.symlink_to(path)
+    with pytest.raises(ContractError):
+        api({**request, "path": "shared/knowledge/linked.md"})
 
 
 def test_context_returns_exact_policy_and_validated_pinned_plan(api, tmp_path):

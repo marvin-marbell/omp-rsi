@@ -2,6 +2,17 @@
 
 All notable changes to agent-memory are documented here.
 
+## 0.7.4 - 2026-09-23
+
+- New memory plans track pinned template and task steps, phase transitions,
+  evidence/review history, and selected user, retrieval, and PR-review events.
+- Explicit amendments create successor plans without changing original scope;
+  existing schema-1 plans remain readable and updatable.
+- RSI projection maps plan/template trajectories with revision-linked witnesses.
+- A read-only RSI entry snapshot hashes explicitly selected ordinary memory
+  entries without returning their path-resolved body or treating a retrieval
+  claim as verified.
+
 ## 0.2.0 - 2026-08-01
 
 This is the first code-only release of the current agent-memory CLI. It is

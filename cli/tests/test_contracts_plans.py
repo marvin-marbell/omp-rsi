@@ -42,6 +42,17 @@ def report(req="outcome", evidence_id="result"):
 def review(evidence_id="result", verdict="accepted"):
     return {"evidence_id": evidence_id, "verdict": verdict, "note": "Reviewed against requirement"}
 
+def finish_phase(api, plan):
+    plan = append_event(api, plan, timeline_event("phase-1", "phase_transition", "planning", "execution"))
+    for step in plan["plan"]["steps"]:
+        step_id = step["id"]
+        plan = append_event(api, plan, timeline_event(f"{step_id}-start", "step_transition",
+                                                       "pending", "in_progress", step_id=step_id))
+        plan = append_event(api, plan, timeline_event(f"{step_id}-done", "step_transition",
+                                                       "in_progress", "complete", step_id=step_id))
+    plan = append_event(api, plan, timeline_event("phase-2", "phase_transition", "execution", "review"))
+    return append_event(api, plan, timeline_event("phase-3", "phase_transition", "review", "complete"))
+
 
 def test_discovery_review_snapshot_and_memory_frontmatter(api):
     listing = api({"action": "templates"})
@@ -92,6 +103,8 @@ def test_lifecycle_report_review_and_completion(api):
     with pytest.raises(ContractError, match="cannot complete"):
         update(api, reported, status="complete")
     done = update(api, reported, reviews=[review(), review("tests")], status="complete")
+    assert not done["validation"]["complete"], "A complete work item is not a completed delivery phase"
+    done = finish_phase(api, done)
     assert done["validation"]["complete"]
     loaded = api({"action": "read", "plan_id": "example"})
     assert loaded["plan"] == done["plan"]
@@ -114,7 +127,8 @@ def test_exception_needs_explicit_acceptance_and_audit(api):
     exception = accepted["plan"]["work_items"][0]["exceptions"][0]
     assert exception["reported_by"] == "parent"
     assert exception["reviews"][0]["reviewed_by"] == "reviewer-agent"
-    assert accepted["validation"]["complete"]
+    assert not accepted["validation"]["complete"]
+    assert finish_phase(api, accepted)["validation"]["complete"]
 
 
 def test_rejected_exception_does_not_satisfy_requirement(api):
@@ -446,3 +460,142 @@ def test_review_reversal_requires_explicit_reopening(api):
     reopened = update(api, done, reviews=[review("tests", "rejected")], status="in_progress")
     assert not reopened["validation"]["complete"]
     assert len(reopened["plan"]["work_items"][0]["evidence"][1]["reviews"]) == 2
+
+
+def timeline_event(event_id, kind, before, after, *, source="agent", cause="none",
+                   reference="selected-artifact", step_id=None):
+    event = {"id": event_id, "kind": kind, "source": source, "reference": reference,
+             "summary": "Selected context, not a session transcript", "before": before,
+             "after": after, "cause": cause}
+    if step_id is not None:
+        event["step_id"] = step_id
+    return event
+
+
+def append_event(api, plan, event):
+    return api({"action": "append_event", "plan_id": plan["plan"]["plan_id"],
+                "revision": plan["revision"], "event": event})
+
+
+def test_schema_two_recoverable_phase_step_and_review_trajectory(api):
+    request = api({"action": "review", "template_id": "general"})["create_example"]
+    request["task"]["steps"] = ["Exercise the contract"]
+    plan = api(request)
+    assert plan["plan"]["schema"] == 2
+    assert plan["plan"]["phase"] == "planning"
+    assert len(plan["plan"]["steps"]) == len(plan["plan"]["template"]["content"]["steps"]) + 1
+    plan = append_event(api, plan, timeline_event("phase-1", "phase_transition", "planning", "execution"))
+    for step in plan["plan"]["steps"]:
+        step_id = step["id"]
+        plan = append_event(api, plan, timeline_event(f"{step_id}-start", "step_transition",
+                                                      "pending", "in_progress", step_id=step_id))
+        plan = append_event(api, plan, timeline_event(f"{step_id}-done", "step_transition",
+                                                      "in_progress", "complete", step_id=step_id))
+    plan = update(api, plan, evidence=[report(), report("verification", "tests")],
+                  status="in_progress")
+    plan = update(api, plan, reviews=[review(), review("tests")], status="complete")
+    plan = append_event(api, plan, timeline_event("phase-review", "phase_transition",
+                                                  "execution", "review"))
+    plan = append_event(api, plan, timeline_event("phase-complete", "phase_transition",
+                                                  "review", "complete"))
+    assert plan["validation"]["complete"]
+    with pytest.raises(ContractError, match="plan phase cannot complete"):
+        update(api, plan, reviews=[review("tests", "rejected")], status="in_progress")
+    plan = append_event(api, plan, timeline_event("review-reopen", "phase_transition",
+                                                  "complete", "review"))
+    plan = update(api, plan, reviews=[review("tests", "rejected")], status="in_progress")
+    plan = append_event(api, plan, timeline_event("step-reopen", "step_transition",
+                                                  "complete", "in_progress", step_id="step-1"))
+    assert not plan["validation"]["complete"]
+    assert [e["kind"] for e in plan["plan"]["timeline"]].count("review") == 3
+    assert any(e["kind"] == "status_transition" and e["before"] == "complete" and
+               e["after"] == "in_progress" for e in plan["plan"]["timeline"])
+    assert api({"action": "read", "plan_id": "my-plan"})["plan"] == plan["plan"]
+
+
+def test_timeline_external_correction_and_adverse_identity_transitions(api):
+    original = create(api)
+    plan = original
+    external = timeline_event("pr-scope", "external_change", "Review target A", "Target B",
+                              source="pr_review", cause="external_change", reference="pr/19/review/1")
+    plan = append_event(api, plan, external)
+    omission = timeline_event("agent-miss", "steering", "Agent omitted contract", "User restored contract",
+                              source="user", cause="agent_omission", reference="user/correction/1")
+    plan = append_event(api, plan, omission)
+    assert [e["cause"] for e in plan["plan"]["timeline"]] == ["external_change", "agent_omission"]
+    assert plan["plan"]["timeline"][0]["reference"] == "pr/19/review/1"
+    bad = [
+        (external, "duplicate"),
+        (timeline_event("bad-step", "step_transition", "pending", "in_progress", step_id="missing"), "unknown step"),
+        (timeline_event("bad-phase", "phase_transition", "planning", "complete"), "invalid phase"),
+        (timeline_event("bad-source", "retrieval", "Earlier", "Later", source="user"), "kind/source"),
+        (timeline_event("bad-context", "steering", "Prior", "x" * 501, source="user"), "exceeds"),
+    ]
+    for event, message in bad:
+        with pytest.raises(ContractError, match=message):
+            append_event(api, plan, event)
+    with pytest.raises(ContractError, match="stale"):
+        append_event(api, original, omission | {"id": "other-event"})
+    assert api({"action": "read", "plan_id": "example"})["revision"] == plan["revision"]
+
+
+def test_successor_preserves_parent_scope_and_pinned_template(api):
+    parent = create(api)
+    original = deepcopy(parent["plan"])
+    revised = deepcopy(parent["plan"]["task"])
+    revised["good"] = "Exercise revised external review scope"
+    revised["work_items"] = [
+        {"id": "deliver", "title": "Deliver", "owner": "child", "requirement_ids": ["outcome"]},
+        {"id": "verify", "title": "Verify", "owner": "parent", "requirement_ids": ["verification"]},
+    ]
+    amendment = timeline_event("amend-review", "amendment", "Original review target",
+                               "Revised review target", source="pr_review",
+                               cause="external_change", reference="pr/19/review/2")
+    request = {"action": "amend", "plan_id": "example", "revision": parent["revision"],
+               "successor_plan_id": "revised", "task": revised, "event": amendment}
+    successor = api(request)
+    assert successor["plan"]["schema"] == 2
+    assert successor["plan"]["predecessor"] == {"plan_id": "example", "revision": parent["revision"],
+                                                 "family_plan_id": "example"}
+    assert successor["plan"]["template"] == original["template"]
+    assert successor["plan"]["timeline"][0]["kind"] == "amendment"
+    grandchild = api({**request, "plan_id": "revised", "revision": successor["revision"],
+                      "successor_plan_id": "revised-again",
+                      "event": {**amendment, "id": "amend-again"}})
+    assert grandchild["plan"]["predecessor"]["family_plan_id"] == "example"
+    assert api({"action": "read", "plan_id": "example"})["plan"] == original
+    with pytest.raises(ContractError, match="stale"):
+        api(request)
+    updated_parent = update(api, parent, status="in_progress")
+    with pytest.raises(ContractError, match="stale"):
+        api({**request, "successor_plan_id": "another"})
+    with pytest.raises(ContractError, match="cover all"):
+        api({**request, "revision": updated_parent["revision"], "successor_plan_id": "another",
+             "task": {**revised, "work_items": revised["work_items"][:1]}})
+
+
+def test_v1_plan_updates_without_migration_and_can_spawn_v2_successor(api, tmp_path):
+    created = create(api)
+    v1 = deepcopy(created["plan"])
+    v1["schema"] = 1
+    for key in ("phase", "steps", "timeline"):
+        del v1[key]
+    from agent_memory.plans import render_plan
+    store = ContractStore(tmp_path, no_git=True)
+    store.save("plans", "example", v1, render_plan(v1), actor="parent",
+               expected=created["revision"])
+    old = api({"action": "read", "plan_id": "example"})
+    assert old["plan"]["schema"] == 1 and "timeline" not in old["plan"]
+    old = update(api, old, status="in_progress")
+    assert old["plan"]["schema"] == 1 and "timeline" not in old["plan"]
+    with pytest.raises(ContractError, match="schema 1"):
+        append_event(api, old, timeline_event("event", "steering", "Old", "New", source="user"))
+    task = {**old["plan"]["task"], "work_items": [
+        {key: item[key] for key in ("id", "title", "owner", "requirement_ids")}
+        for item in old["plan"]["work_items"]]}
+    successor = api({"action": "amend", "plan_id": "example", "revision": old["revision"],
+                     "successor_plan_id": "v2-successor", "task": task,
+                     "event": timeline_event("amend-old", "amendment", "Old scope", "Reaffirmed scope",
+                                             source="user", reference="user/scope")})
+    assert successor["plan"]["schema"] == 2
+    assert api({"action": "read", "plan_id": "example"})["plan"] == old["plan"]

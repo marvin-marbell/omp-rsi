@@ -8,12 +8,16 @@ never mutates plans, pinned templates, or managed instruction files.
 from __future__ import annotations
 
 import difflib
+import hashlib
+import os
 import re
+import stat
 import uuid
 from pathlib import Path
 
 from agent_memory.contracts_store import ContractError, identifier, now, shape
 from agent_memory.plans import read_plan
+from agent_memory.parser import parse_frontmatter
 from agent_memory.policy import (
     MAX_BODY_CHARS as MAX_POLICY_CHARS,
     REVIEW_GUIDANCE, _lock, content_revision,
@@ -300,6 +304,38 @@ def _promote(store, request):
     return result, repo, paths
 
 
+def _entry_snapshot(store, request):
+    """Hash one explicitly selected ordinary memory entry; never return its body."""
+    shape(request, ("action", "path"), label="entry_snapshot request")
+    relative = string(request["path"], "memory entry path", 240)
+    parts = relative.split("/")
+    if (len(parts) < 3 or not parts[-1].endswith(".md")
+            or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", part)
+                   or part in (".", "..") for part in parts)
+            or parts[0] == "shared" and parts[1] in ("plans", "templates", "policies", "efforts", "imports")):
+        raise ContractError("select an ordinary memory Markdown entry under the memory base")
+    path = store.contracts._safe(store.contracts.base.joinpath(*parts))
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_CONTEXT_BYTES:
+                raise ContractError("memory entry is not a bounded regular file")
+            content = os.read(fd, MAX_CONTEXT_BYTES + 1)
+            if len(content) > MAX_CONTEXT_BYTES or len(content) != info.st_size:
+                raise ContractError("memory entry changed or exceeds snapshot bound")
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise ContractError("selected memory entry is unavailable") from exc
+    try:
+        parse_frontmatter(content.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ContractError("selected memory entry lacks valid frontmatter") from exc
+    return {"path": relative, "revision": "sha256:" + hashlib.sha256(content).hexdigest(),
+            "bytes": len(content), "content_retained": False}
+
+
 def execute_request(request, base, *, actor="unknown", no_git=False, allow_non_main_branch=False):
     """Strict JSON request API used by the Click adapter and server integration."""
     json_text(request)
@@ -321,6 +357,8 @@ def execute_request(request, base, *, actor="unknown", no_git=False, allow_non_m
                     shape(request, ("action",), label="sections request")
                     policy = _policy(store)
                     result = {"policy": policy, "sections": section_index(policy["body"])}
+                elif action == "entry_snapshot":
+                    result = _entry_snapshot(store, request)
                 elif action == "corpus":
                     result = corpus_page(store, request)
                 elif action in ("trial_spec", "trial_results"):
@@ -338,7 +376,7 @@ def execute_request(request, base, *, actor="unknown", no_git=False, allow_non_m
                 elif action == "list":
                     result = _list(store, request)
                 else:
-                    raise ContractError("action must be context, sections, corpus, propose, trial_spec, trial_results, record, read, lookup, list, or promote")
+                    raise ContractError("action must be context, sections, corpus, entry_snapshot, propose, trial_spec, trial_results, record, read, lookup, list, or promote")
     if paths:
         result["persistence"] = {"saved": True, "git": store.publish(repo, paths)}
         if store.local_protection is not None:

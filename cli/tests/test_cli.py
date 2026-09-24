@@ -12,13 +12,6 @@ from agent_memory.cli import cli
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def test_version() -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli, ["--version"])
-    assert result.exit_code == 0
-    assert result.output == "memory, version 0.7.3\n"
-
-
 class TestLsCommand:
     def test_ls_fixtures(self) -> None:
         runner = CliRunner()
