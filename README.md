@@ -58,6 +58,26 @@ Use `memory_rsi` with `{"action":"status"}` to inspect the configured RSI state.
 
 Source: [vantasnerdan/memory-rsi](https://github.com/vantasnerdan/memory-rsi), MIT; see [LICENSE](LICENSE).
 
+## Repository code discovery
+
+`code_discover` adapts [Jevgrep](https://github.com/dzhng/jevgrep)'s evidence-first retrieval concept to OMP's built-in `find`. It is not a second model service or an embedding index. Give it a behavior question and an **explicit absolute repository root**:
+
+```json
+{"cwd":"/path/to/approved/repository","query":"How are accepted claims validated against their proof records?","source_bytes":12000}
+```
+
+Before calling it, place exact approved roots in the **operator-owned** `OMP_RSI_CONFIG` file and start a new OMP session:
+
+```json
+{"codeDiscoveryRoots":["/path/to/approved/repository"]}
+```
+
+Without a matching canonical root, the tool refuses **before** invoking `find`. Project overrides and regular plugin settings cannot set this allowlist. This feature currently requires Linux descriptor-path verification; other platforms fail closed rather than risk following a swapped symlink out of the selected root.
+
+It invokes OMP's configured `find` provider to select files, then reads eligible current files locally and returns bounded safe file/range leads, bounded line-numbered source excerpts, read-time hashes and coverage/partial-result warnings. A path that passes selection but cannot be read remains a lead with an explicit limitation, not evidence of absence. Output is source data, not instructions, a diagnosis or test coverage. For known paths/symbols use `read`, LSP or `grep`; for indexed relationships use graph-only `gitnexus`. This tool never builds a graph or generates embeddings.
+
+**Disclosure:** An allowed root authorizes OMP `find` to send candidate repository source to its **currently configured model provider before this tool's final excerpt/path filtering**. Review the allowlist whenever that provider changes. Neither the upstream discovery filters nor the local credential heuristics can guarantee sanitization. `typesafeEnabled` governs RSI assessments and does **not** gate OMP's separate `find` backend. No Jevgrep account or additional key is read. Searches are bounded and selective, so an empty result or a directory not explored does not prove absence. This workflow has not inherited Jevgrep's task-cost or solve-rate measurements.
+
 ## Durable tasks and RSI trajectories
 
 For work that produces a lasting artifact, multi-step implementation, consequential decision, or reusable lesson, use memory as the task tracker: `memory_setup status`, `memory_plan templates`, `memory_plan review`, then `memory_plan create` before implementation. Quick chat and transient checks need no plan. A new plan pins its template and starts in `planning`; template and task steps are individually tracked. `memory_plan append_event` records phase/step transitions or bounded selected steering, retrieval, and PR-review summaries with an exact reference and an explicitly *reported* cause. `memory_plan update` automatically records scoped evidence, review, and work-item transitions. A changed task scope uses `memory_plan amend` to create a successor; the original plan and its pinned requirements remain unchanged. Existing schema-1 plans stay readable/updatable; amend one to start a schema-2 successor.

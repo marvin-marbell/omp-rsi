@@ -2,6 +2,7 @@ import { readPluginSettings, resolveConfig } from "./config.js";
 import { createMemoryRunner } from "./runner.js";
 import { registerSetupTools } from "./setup-tools.js";
 import { registerGraphTools } from "./graph-tools.js";
+import { registerCodeDiscoverTool } from "./code-discover-tools.js";
 import { registerMemoryReadTools } from "./memory-read-tools.js";
 import { registerMemoryWriteTools } from "./memory-write-tools.js";
 import { registerMemoryMaintenanceTools } from "./memory-maintenance-tools.js";
@@ -22,6 +23,7 @@ export default function ompRsi(pi) {
 
   registerSetupTools(pi, config);
   registerGraphTools(pi, config);
+  registerCodeDiscoverTool(pi, config);
   registerMemoryReadTools(pi, { memory });
   registerMemoryWriteTools(pi, config, { memory });
   registerMemoryMaintenanceTools(pi, { memory });

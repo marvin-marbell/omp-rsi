@@ -13,7 +13,7 @@ const BOUNDS = {
 	typesafeMaxRequestBytes: [1, 131_072], typesafeMaxResponseBytes: [1, 262_144], typesafeRetries: [0, 3],
 };
 const STRINGS = ["agentId", "typesafeEndpoint", "typesafeModel", "typesafeApiKeyEnv"];
-const ALLOWED = new Set([...PATHS, ...EXECUTABLES, ...BOOLEAN, ...Object.keys(BOUNDS), ...STRINGS, "instructionFiles"]);
+const ALLOWED = new Set([...PATHS, ...EXECUTABLES, ...BOOLEAN, ...Object.keys(BOUNDS), ...STRINGS, "instructionFiles", "codeDiscoveryRoots"]);
 const PLUGIN_SETTINGS = ["base", "agentId", "typesafeEnabled", "rsiInstructionDiscoveryEnabled", "rsiTelemetryEnabled"];
 
 function readJsonFile(path, label, limit) {
@@ -88,6 +88,12 @@ export function resolveConfig(overrides = {}) {
 		if (selected[field] !== undefined && (!Number.isSafeInteger(selected[field]) || selected[field] < min || selected[field] > max)) throw new Error(`${field} must be an integer between ${min} and ${max}`);
 	}
 	if (selected.instructionFiles !== undefined && (!Array.isArray(selected.instructionFiles) || selected.instructionFiles.some(path => typeof path !== "string" || !isAbsolute(path)))) throw new Error("instructionFiles must be an array of absolute operator-selected paths");
+	// Deliberately excluded from project overrides and plugin settings. Each
+	// exact root authorizes OMP find's configured provider to inspect its source.
+	if (selected.codeDiscoveryRoots !== undefined && (!Array.isArray(selected.codeDiscoveryRoots) ||
+		selected.codeDiscoveryRoots.length > 32 || selected.codeDiscoveryRoots.some(path => typeof path !== "string" || !isAbsolute(path)))) {
+		throw new Error("codeDiscoveryRoots must be at most 32 absolute operator-selected repository roots");
+	}
 	return runtimeConfig({
 		base: defaultMemoryBase(), timeoutMs: 60_000, setupTimeoutMs: 600_000, gitnexusTimeoutMs: 120_000,
 		rsiLearningTimeoutMs: 300_000, typesafeEnabled: false, rsiInstructionDiscoveryEnabled: false,
@@ -96,5 +102,6 @@ export function resolveConfig(overrides = {}) {
 		typesafeMaxRequestBytes: 131_072, typesafeMaxResponseBytes: 262_144, typesafeRetries: 1,
 		...selected,
 		...(selected.instructionFiles ? { instructionFiles: [...selected.instructionFiles] } : {}),
+		...(selected.codeDiscoveryRoots ? { codeDiscoveryRoots: [...selected.codeDiscoveryRoots] } : {}),
 	});
 }
