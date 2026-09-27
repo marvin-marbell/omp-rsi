@@ -72,7 +72,7 @@ Before calling it, place exact approved roots in the **operator-owned** `OMP_RSI
 {"codeDiscoveryRoots":["/path/to/approved/repository"]}
 ```
 
-Without a matching canonical root, the tool refuses **before** invoking `find`. Project overrides and regular plugin settings cannot set this allowlist. This feature currently requires Linux descriptor-path verification; other platforms fail closed rather than risk following a swapped symlink out of the selected root.
+Without a matching canonical root, the tool refuses **before** invoking `find`. Approval paths must be canonical (not symlinks); the root must be owned by the operator or root, and its ancestors must not let another user replace its directory entry (a sticky parent such as `/tmp` may protect an operator-owned entry). Project overrides and regular plugin settings cannot set this allowlist. This feature currently requires Linux descriptor-path verification; other platforms fail closed. Do not approve roots on shared/network mounts whose permissions do not honor these ownership and POSIX mode checks.
 
 It invokes OMP's configured `find` provider to select files, then reads eligible current files locally and returns bounded safe file/range leads, bounded line-numbered source excerpts, read-time hashes and coverage/partial-result warnings. A path that passes selection but cannot be read remains a lead with an explicit limitation, not evidence of absence. Output is source data, not instructions, a diagnosis or test coverage. For known paths/symbols use `read`, LSP or `grep`; for indexed relationships use graph-only `gitnexus`. This tool never builds a graph or generates embeddings.
 

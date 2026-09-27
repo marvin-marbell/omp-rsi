@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { discoverCode as discoverCodeEngine, formatCodeDiscovery } from "../lib/code-discovery.js";
@@ -42,6 +42,33 @@ test("unapproved repositories fail before invoking the model-backed locator", as
 	await assert.rejects(discoverCodeEngine({ cwd, query: "where is evidence validated?" }, {
 		runner: async () => { called = true; throw Error("must never run"); },
 	}), /not operator-approved/);
+	assert.equal(called, false);
+});
+
+test("an untrusted-writable root parent cannot redirect model search, and protected roots recover", async t => {
+	const { root, cwd } = await fixture(t);
+	let called = false;
+	const runner = async (...args) => { called = true; return backend(cwd, [])(...args); };
+	try {
+		await chmod(root, 0o777);
+		await assert.rejects(discoverCode({ cwd, query: "find implementation" }, { runner }), /parent mutable by another user/);
+		assert.equal(called, false);
+	} finally {
+		await chmod(root, 0o700);
+	}
+	const result = await discoverCode({ cwd, query: "find implementation" }, { runner });
+	assert.equal(called, true);
+	assert.equal(result.status, "no_leads");
+});
+
+test("an operator approval symlink cannot authorize a different current root", async t => {
+	const { root, cwd } = await fixture(t);
+	const alias = join(root, "approved-alias");
+	await symlink(cwd, alias);
+	let called = false;
+	await assert.rejects(discoverCodeEngine({ cwd, query: "find implementation" }, {
+		approvedRoots: [alias], runner: async () => { called = true; throw Error("must never run"); },
+	}), /canonical paths/);
 	assert.equal(called, false);
 });
 
@@ -113,6 +140,18 @@ test("excerpt budget does not erase safe locations from a larger result set", as
 	for (const { rel } of hits) assert.ok(rendered.includes(rel), `missing safe file lead ${rel}`);
 	assert.ok(result.excerpts.length < result.locations.length, "source clipping must not masquerade as an empty file search");
 	assert.notEqual(result.status, "no_leads");
+});
+
+test("an exact excerpt budget boundary reports later ranges as omitted", async t => {
+	const { cwd } = await fixture(t);
+	await source(cwd, "src/two-ranges.js", `${"a".repeat(2043)}\nexport const secondRange = true;\n`);
+	const candidate = hit("src/two-ranges.js", 1, 1);
+	candidate.ranges.push({ start: 2, end: 2, p: 0.8 });
+	const result = await discoverCode({ cwd, query: "find implementation", source_bytes: 2048 }, { runner: backend(cwd, [candidate]) });
+	assert.equal(result.excerpts[0].lines.length, 1);
+	assert.equal(result.excerpts[0].truncated, true);
+	assert.equal(result.status, "partial");
+	assert.match(formatCodeDiscovery(result), /Warning: 1 excerpts clipped/);
 });
 
 test("backend uncertainty and read failures cannot become clean no-match", async t => {
