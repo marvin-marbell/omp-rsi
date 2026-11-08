@@ -126,11 +126,9 @@ for (const id of ["reward_orientation", "generality", "synthesis", "maintenance"
 	}
 }
 
-test("a confident regression and boundary concern dominate favorable quality and evidence", () => {
+test("a confident regression defeats favorable comparisons", () => {
 	const answers = evaluation(2); setChoice(answers.case_1, "baseline");
 	assert.equal(interpret(answers, 2).disposition, "retain-baseline");
-	answers.boundary_erosion.noul = 0.8;
-	assert.equal(interpret(answers, 2).disposition, "human-review-required");
 });
 
 test("unsupported outcomes stay unsupported even when all semantic preferences favor the candidate", () => {

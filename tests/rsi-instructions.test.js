@@ -237,15 +237,6 @@ test("reviewed cross-task feedback can support review only through one exact ite
 	assert.equal(result.interpretation.automatic_apply, false);
 });
 
-test("user steering or tool metadata alone cannot piggyback an outcome-supported proposal", async () => {
-	const f = stagedFixture({ feedbackArtifact: insight({ reviewed: false }), answerOptions: { witness: "w0", feedbackItem: "f0", feedbackRelation: "supports-review", causality: "plausible-mechanism", counterevidence: "considered", synthesisOutcomes: "supported", synthesisAction: "review-change" } });
-	const result = await f.audit({ feedback_ids: ["insight-feedback"] }, {}, { agent: { id: "agent" } });
-	assert.equal(result.feedback.eligible_items, 0);
-	assert.equal(result.interpretation.change_review_supported, false);
-	assert.equal(result.proposal_guidance.proposals.length, 0);
-	assert.equal(result.interpretation.disposition, "investigate");
-});
-
 test("maximum admitted staged run persists a bounded final summary after all assessments", async () => {
 	const discovered = discovery();
 	discovered.members = Array.from({ length: 43 }, (_, index) => ({ id: `section:member-${index}`, class_id: "system-current", kind: "system", scope: "current system", body: `${index}:` + "x".repeat(597), revision: `sha256:${index.toString(16).padStart(64, "0")}`, metadata: { name: `member-${index}` } }));

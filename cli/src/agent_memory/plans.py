@@ -237,11 +237,19 @@ def validate_item_scope(items, requirement_ids, *, stored=False):
 
 
 def _review(value, target_key):
-    shape(value, (target_key, "verdict", "note"), label="review")
+    shape(value, (target_key, "verdict", "note"), ("blocking", "basis"), label="review")
     identifier(value[target_key], target_key)
-    if not isinstance(value["verdict"], str) or value["verdict"] not in ("accepted", "rejected"):
-        raise ContractError("review verdict must be accepted or rejected")
+    if not isinstance(value["verdict"], str) or value["verdict"] not in ("accepted", "rejected", "concern"):
+        raise ContractError("review verdict must be accepted, rejected or concern")
     text(value["note"], "review note")
+    if "blocking" in value and type(value["blocking"]) is not bool:
+        raise ContractError("blocking must be boolean")
+    if value.get("blocking"):
+        if value["verdict"] == "accepted":
+            raise ContractError("an accepted review cannot be blocking")
+        text(value.get("basis"), "blocking finding basis")
+    elif "basis" in value:
+        text(value["basis"], "finding basis")
 
 
 def _report(value, exception=False):
@@ -258,16 +266,18 @@ def _validate_records(item, exception=False):
     report_fields = ("id", "requirement_id", "reason", "alternative") if exception else ("id", "requirement_id", "summary", "reference")
     seen = set()
     for record in sequence(item[key], key):
-        shape(record, (*report_fields, "reported_by", "reported_at", "reviews"), label=key)
+        shape(record, (*report_fields, "reported_by", "reported_at", "reviews"), ("outcome_generation",), label=key)
         _report({k: record[k] for k in report_fields}, exception)
         if record["id"] in seen or record["requirement_id"] not in item["requirement_ids"]:
             raise ContractError("duplicate record ID or evidence outside work-item scope")
         seen.add(record["id"])
         text(record["reported_by"], "reported_by")
         text(record["reported_at"], "reported_at")
+        if "outcome_generation" in record and (type(record["outcome_generation"]) is not int or record["outcome_generation"] < 0):
+            raise ContractError("outcome_generation must be a nonnegative integer")
         for review in sequence(record["reviews"], "reviews"):
-            shape(review, ("verdict", "note", "reviewed_by", "reviewed_at"), label="stored review")
-            _review({"record_id": record["id"], "verdict": review["verdict"], "note": review["note"]}, "record_id")
+            shape(review, ("verdict", "note", "reviewed_by", "reviewed_at"), ("blocking", "basis"), label="stored review")
+            _review({"record_id": record["id"], **{k: review[k] for k in ("verdict", "note", "blocking", "basis") if k in review}}, "record_id")
             text(review["reviewed_by"], "reviewed_by")
             text(review["reviewed_at"], "reviewed_at")
 
@@ -276,22 +286,72 @@ def _accepted(record):
     return bool(record["reviews"] and record["reviews"][-1]["verdict"] == "accepted")
 
 
-def item_progress(item):
-    evidenced = {e["requirement_id"] for e in item["evidence"] if _accepted(e)}
-    excepted = {e["requirement_id"] for e in item["exceptions"] if _accepted(e)}
-    pending_exceptions = [e["id"] for e in item["exceptions"] if not e["reviews"]]
-    missing = sorted(set(item["requirement_ids"]) - evidenced - excepted)
+def _usable(record):
+    if not record["reviews"]:
+        return True
+    last = record["reviews"][-1]
+    return last["verdict"] != "rejected" and not last.get("blocking", False)
+
+
+def item_progress(item, *, optional=(), withdrawn=(), generation=0):
+    evidenced = {e["requirement_id"] for e in item["evidence"] if _usable(e) and e.get("outcome_generation", 0) == generation}
+    reviewed = {e["requirement_id"] for e in item["evidence"] if _accepted(e) and e.get("outcome_generation", 0) == generation}
+    excepted = {e["requirement_id"] for e in item["exceptions"] if _accepted(e) and e.get("outcome_generation", 0) == generation}
+    required = set(item["requirement_ids"]) - set(optional) - set(withdrawn)
+    missing = sorted(required - evidenced - excepted)
+    pending_exceptions = [e["id"] for e in item["exceptions"] if not e["reviews"] and e["requirement_id"] in missing and e.get("outcome_generation", 0) == generation]
+    blockers = [e["id"] for e in item["evidence"] + item["exceptions"] if e.get("outcome_generation", 0) == generation
+                and e["requirement_id"] in required and e["reviews"] and e["reviews"][-1].get("blocking") is True]
     return {"work_item_id": item["id"], "reported_evidence": len(item["evidence"]),
-            "reviewed_requirements": sorted(evidenced), "accepted_exceptions": sorted(excepted),
+            "reviewed_requirements": sorted(reviewed), "accepted_exceptions": sorted(excepted),
             "missing_requirements": missing, "pending_exceptions": pending_exceptions,
-            "ready": not missing and not pending_exceptions}
+            "process_unreported": sorted((set(item["requirement_ids"]) & set(optional)) - evidenced - excepted),
+            "blocking_findings": blockers, "ready": not missing and not blockers}
+
+
+def _direction(plan):
+    records = plan.get("steering", [])
+    generation, outcome, withdrawn, exemptions = 0, plan["task"]["good"], set(), set()
+    template = plan["template"]["content"]
+    process = {r["id"] for key in ("achievements", "validation") for r in template[key] if r.get("scope") == "process"}
+    # Existing plans pin an older built-in coding template without scope tags.
+    # Recognize only exact historical built-in descriptions, never custom text.
+    legacy = {
+        "ast": "Use AST-aware exploration to map affected symbols before modifying.",
+        "lsp": "Use available LSP navigation/diagnostics; otherwise record a capability exception.",
+        "design": "Respect SRP and separation of concerns; avoid god files and god functions.",
+        "gitops": "Use GitOps: inspect diffs and state, preserve unrelated changes, and report delivery accurately.",
+    }
+    if plan["template"]["template_id"] == "coding":
+        process.update(r["id"] for r in template["achievements"]
+                       if "scope" not in r and legacy.get(r["id"]) == r["description"])
+    task_ids = {r["id"] for key in ("achievements", "validation") for r in plan["task"].get(key, [])}
+    for item in sequence(records, "steering"):
+        shape(item, ("instruction", "actor", "at"), ("outcome", "withdraw_requirements", "process_exemptions"), label="steering")
+        for key in ("instruction", "actor", "at"): text(item[key], key)
+        if "outcome" in item:
+            text(item["outcome"], "outcome")
+            if item["outcome"] != outcome:
+                generation += 1
+                outcome = item["outcome"]
+        for key, allowed, target in (("withdraw_requirements", task_ids, withdrawn), ("process_exemptions", process, exemptions)):
+            if key in item:
+                ids = sequence(item[key], key)
+                if any(not isinstance(i, str) or i not in allowed for i in ids) or len(ids) != len(set(ids)):
+                    raise ContractError(f"{key} must name distinct applicable {('task' if key == 'withdraw_requirements' else 'process')} requirements")
+                if key == "withdraw_requirements" and "outcome" not in item:
+                    raise ContractError("withdrawing an outcome requirement requires an explicit revised outcome")
+                target.update(ids)
+    return {"outcome": outcome, "outcome_generation": generation, "withdrawn_requirements": sorted(withdrawn),
+            "process_exemptions": sorted(exemptions), "process_requirements": sorted(process),
+            "latest_instruction": records[-1]["instruction"] if records else None}
 
 
 def validate_plan(plan):
     schema = plan.get("schema")
     fields = ("kind", "schema", "plan_id", "title", "created_by", "template", "task", "work_items")
     shape(plan, fields + (("phase", "steps", "timeline") if schema == 2 else ()),
-          ("predecessor",) if schema == 2 else (), label="plan contract")
+          ("predecessor", "steering") if schema == 2 else ("steering",), label="plan contract")
     if plan["kind"] != "plan" or type(schema) is not int or schema not in (1, 2):
         raise ContractError("unsupported plan contract")
     identifier(plan["plan_id"], "plan_id")
@@ -305,20 +365,21 @@ def validate_plan(plan):
         raise ContractError("pinned template snapshot hash mismatch")
     reqs = validate_task(plan["task"], template)
     validate_item_scope(plan["work_items"], {r["id"] for r in reqs}, stored=True)
+    direction = _direction(plan)
     progress = []
     for item in plan["work_items"]:
         if not isinstance(item["status"], str) or item["status"] not in STATUSES:
             raise ContractError("invalid work item status")
         _validate_records(item)
         _validate_records(item, exception=True)
-        detail = item_progress(item)
+        detail = item_progress(item, optional=direction["process_requirements"], withdrawn=direction["withdrawn_requirements"], generation=direction["outcome_generation"])
         if item["status"] == "complete" and not detail["ready"]:
-            raise ContractError(f"work item {item['id']} cannot complete without reviewed evidence or accepted exceptions")
+            raise ContractError(f"work item {item['id']} cannot complete without evidence for its current outcome or accepted exceptions")
         progress.append(detail)
     if schema == 2:
         _validate_timeline(plan)
     complete = all(i["status"] == "complete" for i in plan["work_items"]) and (schema == 1 or plan["phase"] == "complete")
-    return {"valid": True, "complete": complete, "work_items": progress}
+    return {"valid": True, "complete": complete, "direction": direction, "work_items": progress}
 
 
 def render_plan(plan):
@@ -346,6 +407,13 @@ def render_plan(plan):
             sections.append(f"## Task {key}")
             sections.append(f"This section lists task-specific {key} alongside the pinned template.")
             sections.extend(f"- {v['id']}: {v['description']} Evidence: {v['evidence']}" if isinstance(v, dict) else f"- {v}" for v in task[key])
+    direction = _direction(plan)
+    if direction["latest_instruction"]:
+        sections += ["## Current direction", direction["latest_instruction"],
+                     f"Current intended outcome: {direction['outcome']}",
+                     "The original task and direction history remain below as recorded; apply the latest direction to the next action."]
+        for item in plan["steering"]:
+            sections.append(f"- {item['at']} — {item['actor']}: {item['instruction']}" + (f" (revised outcome: {item['outcome']})" if 'outcome' in item else ""))
     sections += ["## Work items and evidence", "Scoped work tracks reported evidence and explicit review separately."]
     for item in plan["work_items"]:
         sections += [f"### {item['id']}: {item['title']}",
@@ -357,8 +425,8 @@ def render_plan(plan):
                 sections.append(f"- {key} `{record['id']}` for `{record['requirement_id']}`, reported by {record['reported_by']}: {content}")
                 for review in record["reviews"]:
                     sections.append(f"  - Review {review['verdict']} by {review['reviewed_by']}: {review['note']}")
-    sections += ["## Completion", "Complete with reviewed evidence/accepted exceptions." if validate_plan(plan)["complete"] else
-                 "Not complete. Status alone never establishes achievement; reported evidence needs explicit review."]
+    sections += ["## Completion", "Complete with evidence for the current requested outcome." if validate_plan(plan)["complete"] else
+                 "Not complete. Keep the current outcome visible and record evidence appropriate to the change."]
     return "\n\n".join(sections)
 
 
@@ -448,7 +516,7 @@ def amend_plan(store, request, actor):
     return {**result, "plan": plan, "validation": validation}
 
 
-def append_reports(item, reports, actor, *, exception=False):
+def append_reports(item, reports, actor, *, exception=False, generation=0):
     key = "exceptions" if exception else "evidence"
     existing = {e["id"] for e in item[key]}
     for report in sequence(reports, key):
@@ -458,7 +526,7 @@ def append_reports(item, reports, actor, *, exception=False):
         if report["requirement_id"] not in item["requirement_ids"]:
             raise ContractError("evidence/exception is outside selected work-item scope")
         existing.add(report["id"])
-        item[key].append({**deepcopy(report), "reported_by": actor, "reported_at": now(), "reviews": []})
+        item[key].append({**deepcopy(report), "reported_by": actor, "reported_at": now(), "reviews": [], "outcome_generation": generation})
 
 
 def append_reviews(item, reviews, actor, *, exception=False):
@@ -471,6 +539,7 @@ def append_reviews(item, reviews, actor, *, exception=False):
         if record is None:
             raise ContractError(f"review target not in this work item: {review[target]}")
         record["reviews"].append({"verdict": review["verdict"], "note": review["note"],
+                                  **{k: review[k] for k in ("blocking", "basis") if k in review},
                                   "reviewed_by": actor, "reviewed_at": now()})
 
 
@@ -486,12 +555,19 @@ def update_plan(store, request, actor):
     item = next((i for i in plan["work_items"] if i["id"] == work_item_id), None)
     if item is None:
         raise ContractError("work item not found")
-    # Reviews deliberately precede new reports: a single operation cannot both
-    # report a new achievement/exception and silently mark it accepted.
+    generation = _direction(plan)["outcome_generation"]
     v2 = plan["schema"] == 2
     for key in ("reviews", "exception_reviews", "evidence", "exceptions"):
         if key in request:
             sequence(request[key], key)
+    for key, exception in (("evidence", False), ("exceptions", True)):
+        for report in request.get(key, []):
+            append_reports(item, [report], actor, exception=exception, generation=generation)
+            if v2:
+                ref = f"work/{work_item_id}/{'exception' if exception else 'evidence'}/{report['id']}"
+                _automatic_event(plan, "report", actor, ref,
+                                 report["reason" if exception else "summary"][:500],
+                                 "unreported", "reported")
     for key, exception in (("reviews", False), ("exception_reviews", True)):
         target = "exception_id" if exception else "evidence_id"
         records = {record["id"]: record for record in item["exceptions" if exception else "evidence"]}
@@ -506,14 +582,6 @@ def update_plan(store, request, actor):
                 ref = f"work/{work_item_id}/{'exception' if exception else 'evidence'}/{review[target]}"
                 _automatic_event(plan, "review", actor, ref, review["note"][:500],
                                  before, review["verdict"])
-    for key, exception in (("evidence", False), ("exceptions", True)):
-        for report in request.get(key, []):
-            append_reports(item, [report], actor, exception=exception)
-            if v2:
-                ref = f"work/{work_item_id}/{'exception' if exception else 'evidence'}/{report['id']}"
-                _automatic_event(plan, "report", actor, ref,
-                                 report["reason" if exception else "summary"][:500],
-                                 "unreported", "reported")
     if "status" in request:
         before, after = item["status"], request["status"]
         if v2 and after not in STATUS_MOVES.get(before, ()):
@@ -526,3 +594,30 @@ def update_plan(store, request, actor):
     result = store.save("plans", request["plan_id"], plan, render_plan(plan), actor=actor,
                         expected=request["revision"])
     return {**result, "plan": plan, "validation": validation}
+
+
+def steer_plan(store, request, actor):
+    """Persist explicit direction without rewriting the original user task."""
+    shape(request, ("action", "plan_id", "revision", "instruction"),
+          ("outcome", "withdraw_requirements", "process_exemptions"), label="steer request")
+    current = read_plan(store, request["plan_id"])
+    check_revision(request["revision"], current["revision"])
+    plan = deepcopy(current["plan"])
+    before = _direction(plan)
+    item = {"instruction": text(request["instruction"], "instruction"), "actor": actor, "at": now()}
+    for key in ("outcome", "withdraw_requirements", "process_exemptions"):
+        if key in request: item[key] = deepcopy(request[key])
+    plan.setdefault("steering", []).append(item)
+    after = _direction(plan)
+    if after["outcome_generation"] != before["outcome_generation"]:
+        if plan["schema"] == 2 and plan["phase"] == "complete":
+            _automatic_event(plan, "phase_transition", actor, "plan/phase", "Outcome changed", "complete", "review")
+            plan["phase"] = "review"
+        for work in plan["work_items"]:
+            if work["status"] == "complete":
+                if plan["schema"] == 2:
+                    _automatic_event(plan, "status_transition", actor, f"work/{work['id']}", "Outcome changed", "complete", "in_progress")
+                work["status"] = "in_progress"
+    validation = validate_plan(plan)
+    result = store.save("plans", request["plan_id"], plan, render_plan(plan), actor=actor, expected=request["revision"])
+    return {**result, "plan": plan, "validation": validation, "next_instruction": item["instruction"]}

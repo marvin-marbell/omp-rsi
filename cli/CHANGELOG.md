@@ -2,6 +2,14 @@
 
 All notable changes to agent-memory are documented here.
 
+## Unreleased
+
+- Plan steering records current direction without replacing the original task
+  and reopens completed work when the requested outcome changes.
+- Selected engineering lessons retain failure, fix and applicability.
+- Process guidance and assessment are proportionate; obsolete review-gate
+  assertions are retired while revision and disclosure boundaries remain.
+
 ## 0.7.4 - 2026-09-23
 
 - New memory plans track pinned template and task steps, phase transitions,

@@ -9,8 +9,8 @@ context: fork
 
 Progressive disclosure memory management for autonomous agents. Git-backed markdown with YAML frontmatter. Structure IS the memory -- discovery over retrieval.
 
-**Repository**: https://github.com/axis-marbell/agent-memory-cli
-**Binary**: `memory` (installed via `pipx install git+ssh://git@github.com/axis-marbell/agent-memory-cli.git@v0.2.0`)
+**Repository**: https://github.com/vantasnerdan/memory-rsi (CLI under `cli/`)
+**Binary**: `memory` (installed via `pipx install "git+https://github.com/vantasnerdan/memory-rsi.git#subdirectory=cli"`)
 
 ## Table of Contents
 
@@ -417,7 +417,7 @@ memory section memory/my-agent/atlas/swarm-messaging.md "delivery"
 
 ### Saving Findings After Research
 
-After completing research, persist findings so future sessions and other agents benefit.
+Save findings when they are reusable: describe what failed or was observed, what actually helped, and when it applies. Routine acknowledgements and receipt counts belong in task history, not a long-term lesson. A user-directed change to a process rule may revise, relax or retire it through the same authorized revision path; do not restore a retired rule from an older memory entry.
 
 ```bash
 AGENT_ID=my-agent memory new api-rate-limits \
@@ -433,7 +433,7 @@ Exponential backoff with jitter. Start at 1s, max 30s." \
 
 ### Searching Before Starting Work
 
-Before beginning any task, check if the knowledge already exists.
+Search existing knowledge when it would help the task; it is not a prerequisite to starting authorized work.
 
 ```bash
 memory search "moltbook API authentication" --base memory
@@ -505,15 +505,21 @@ Hooks are configured in `.claude/settings.json`:
 ```json
 {
   "hooks": {
-    "PreCompact": [{ "hooks": [{ "type": "command", "command": "/path/to/hooks/pre-compact-save.sh", "timeout": 30000 }] }],
-    "SessionStart": [{ "matcher": "compact", "hooks": [{ "type": "command", "command": "/path/to/hooks/post-compact-restore.sh", "timeout": 15000 }] }],
-    "SubagentStart": [{ "hooks": [{ "type": "command", "command": "/path/to/hooks/subagent-start-load.sh", "timeout": 15000 }] }],
-    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "/path/to/hooks/subagent-stop-save.sh", "timeout": 15000 }] }]
+    "PreCompact": [{ "hooks": [{ "type": "command", "command": "/path/to/hooks/pre-compact-save.sh", "timeout": 30 }] }],
+    "SessionStart": [{ "matcher": "compact", "hooks": [{ "type": "command", "command": "/path/to/hooks/post-compact-restore.sh", "timeout": 15 }] }],
+    "SubagentStart": [{ "hooks": [{ "type": "command", "command": "/path/to/hooks/subagent-start-load.sh", "timeout": 15 }] }],
+    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "/path/to/hooks/subagent-stop-save.sh", "timeout": 15 }] }]
   }
 }
 ```
 
 **SessionStart `matcher` field**: The `"matcher": "compact"` is critical -- it ensures the hook only fires after compaction (context window reset), not on every fresh session start. Without it, agents receive memory context injection on cold starts where it is unnecessary and wastes context budget. Other hooks use `"matcher": ""` (empty string) to fire unconditionally.
+
+Timeouts are in seconds.
+
+### Claude Code plugin
+
+The repository is also a Claude Code plugin (`/plugin marketplace add vantasnerdan/memory-rsi`, then `/plugin install memory-rsi@memory-rsi`). It ships this skill, the `/memory-rsi:setup`, `/memory-rsi:recall` and `/memory-rsi:save` commands, and the hooks above plus a policy-injection hook, all off by default. Each is switched on by a plugin option (`hook_restore`, `hook_precompact`, `hook_subagent_load`, `hook_subagent_save`, `hook_policy`) and runs only when `memory_base`, `MEMORY_BASE` or `AGENT_MEMORY_PATH` names an existing directory; `claude/hooks/run.sh` enforces both and otherwise exits 0 silently. No `settings.json` edits are needed for plugin users.
 
 ### Required Environment Variables for Hooks
 

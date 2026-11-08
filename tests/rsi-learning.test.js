@@ -1115,3 +1115,15 @@ test("page selection requires previews for each page and never assesses the next
 	assert.equal(last.status, "complete");
 	assert.equal(f.assessed.length, 2);
 });
+
+
+test("selected engineering lessons retain failure, fix and applicability in telemetry projection", () => {
+	const observation = observedTools();
+	observation.data.lesson = { failure: "stale context omitted the correction", fix: "reload the current plan", applicability: "resumed delegated work" };
+	const units = projectSource({ kind: "observation", id: observation.id, revision: observation.revision }, observation);
+	const lesson = units.find(unit => unit.evidence_rows.some(row => row.path.includes("observation.data.lesson")));
+	assert.ok(lesson);
+	assert.equal(lesson.report.type, "observation-note");
+	assert.equal(lesson.coverage.projection_mode, "telemetry-report-units");
+	for (const value of Object.values(observation.data.lesson)) assert.ok(lesson.evidence_rows.some(row => row.quote.includes(value)));
+});

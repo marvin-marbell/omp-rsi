@@ -42,7 +42,7 @@ test("current plan handle survives a branch resume and never crosses a switched 
   mkdirSync(policy, { recursive: true });
   writeFileSync(join(policy, "agent-policy.md"), "Persistent policy\n");
   const handlers = new Map(), branches = new Map([["one", []], ["two", []]]);
-  let session = "one", revision = "r1", reads = 0, blockNext = false, unblock;
+  let session = "one", revision = "r1", direction = { outcome: "Original", latest_instruction: null }, reads = 0, blockNext = false, unblock;
   const ctx = { sessionManager: { getSessionId: () => session, getBranch: () => branches.get(session) } };
   const pi = {
     on(name, handler) { handlers.set(name, handler); },
@@ -53,7 +53,7 @@ test("current plan handle survives a branch resume and never crosses a switched 
     if (blockNext) { blockNext = false; await new Promise(resolve => { unblock = resolve; }); }
     const request = JSON.parse(options.stdin);
     assert.equal(request.action, "read");
-    return JSON.stringify({ revision, plan: { template: { template_id: "coding" } }, validation: { complete: false } });
+    return JSON.stringify({ revision, plan: { template: { template_id: "coding" } }, validation: { complete: false, direction } });
   };
   const plans = createPlanSession(pi, memory);
   registerPrompt(pi, { base }, plans);
@@ -62,9 +62,12 @@ test("current plan handle survives a branch resume and never crosses a switched 
   const prepared = await handlers.get("before_agent_start")({ systemPrompt: ["Host"] }, ctx);
   assert.match(prepared.systemPrompt.at(-1), /work-one, revision r1/);
   revision = "r2";
+  direction = { outcome: "Ship the fix", latest_instruction: "Proceed without extra review gates" };
   const resumed = await handlers.get("before_agent_start")({ systemPrompt: prepared.systemPrompt }, ctx);
   assert.equal(resumed.systemPrompt.length, 4);
   assert.match(resumed.systemPrompt.at(-1), /work-one, revision r2/);
+  assert.match(resumed.systemPrompt.at(-1), /Ship the fix/);
+  assert.match(resumed.systemPrompt.at(-1), /Proceed without extra review gates/);
   session = "two";
   handlers.get("session_switch")({}, ctx);
   const other = await handlers.get("before_agent_start")({ systemPrompt: resumed.systemPrompt }, ctx);

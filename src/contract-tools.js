@@ -2,7 +2,7 @@ import { contractCreateOutput } from "../lib/contracts-output.js";
 import { contractCliArgs, contractRequestStdin } from "./memory-contract-request.js";
 import { textResult } from "./memory-output.js";
 
-const PLAN_ACTIONS = ["templates", "review", "save_template", "create", "read", "update", "append_event", "amend", "validate", "bind", "unbind"];
+const PLAN_ACTIONS = ["templates", "review", "save_template", "create", "read", "update", "append_event", "steer", "amend", "validate", "bind", "unbind"];
 
 const SESSION_ENTRY = "eu.ideoon.omp-rsi.current-plan";
 const validPlanId = id => typeof id === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u.test(id);
@@ -69,7 +69,7 @@ export function createPlanSession(pi, memory) {
 		try {
 			const entry = JSON.parse(await readPlan(id));
 			if (!isCurrent(token, ctx) || token.state.planId !== id) return null;
-			return { plan_id: id, revision: entry.revision, complete: entry.validation?.complete === true, template_id: entry.plan?.template?.template_id };
+			return { plan_id: id, revision: entry.revision, complete: entry.validation?.complete === true, template_id: entry.plan?.template?.template_id, direction: entry.validation?.direction ?? null };
 		} catch {
 			if (!isCurrent(token, ctx) || token.state.planId !== id) return null;
 			return { plan_id: id, unavailable: true };
@@ -84,10 +84,10 @@ export function registerContractTools(pi, config, { memory, planSession }) {
 	pi.registerTool({
 		name: "memory_plan",
 		label: "Memory plan",
-		description: "Decide whether the task is durable; quick chat needs no plan. For durable work review a template and create a shared plan before implementation. Explicit bind/unbind restores a current-plan handle in the OMP session; amendments preserve pinned requirements. Achievements require reviewed evidence, not counts or model scores.",
+		description: "Use a shared plan when useful. Bind/unbind restores a current-plan handle; steer records the user’s latest direction without discarding the original task. Revision checks preserve concurrent edits.",
 		parameters: z.object({
 			action: z.string().describe(`One of: ${PLAN_ACTIONS.join(", ")}.`),
-			request: z.string().optional().describe('JSON object excluding action. Review: {"template_id":"coding"}. Create: {"plan_id":"task-id","template_id":"coding","template_revision":"<review revision>","task":{...}}. Read/validate/bind: {"plan_id":"task-id"}. Unbind needs no request. Update/append_event/amend use the reviewed template and current revision.'),
+			request: z.string().optional().describe('JSON object excluding action. Review: {"template_id":"coding"}. Create: {"plan_id":"task-id","template_id":"coding","template_revision":"<review revision>","task":{...}}. Read/validate/bind: {"plan_id":"task-id"}. Unbind needs no request. Update/append_event/steer/amend use the current revision. Steer: {"plan_id":"task-id","revision":"<revision>","instruction":"latest user direction"}.'),
 			no_git: z.boolean().optional().describe("Skip memory Git commit/sync; saved files remain durable locally."),
 			allow_non_main_branch: z.boolean().optional().describe("Explicitly allow a memory commit on a non-default branch."),
 		}),

@@ -9,7 +9,7 @@ export function registerPolicyTools(pi, config, { memory }) {
 	pi.registerTool({
 		name: "memory_policy",
 		label: "Memory policy",
-		description: "Read or explicitly revise the persistent agent policy used by OMP prompt assembly. Inspect history or roll back; preview and sync a managed policy section into operator-allowlisted AGENTS-like files without replacing human content. Policy supplements, never overrides, platform permissions or higher-priority instructions. Shared policy changes require explicit review; actor labels are audit metadata, not proof of approval.",
+		description: "Read or explicitly revise the persistent agent policy used by OMP prompt assembly. Inspect history or roll back; preview and sync a managed policy section into operator-allowlisted AGENTS-like files without replacing human content. Policy supplements, never overrides, platform permissions or higher-priority instructions. An authorized revision-checked edit can add, revise, relax or retire process guidance. Actor labels are audit metadata, not proof of approval.",
 		parameters: z.object({
 			action: z.string().describe(`One of: ${POLICY_ACTIONS.join(", ")}.`),
 			request: z.string().optional().describe('JSON object excluding action. Update: {"body":"...","expected_revision":"<read revision>","actor":"agent","reason":"..."}. Rollback also specifies target revision. Sync: {"target":"<configured path>"} previews; apply:true requires expected_revision, expected_target_revision, actor and reason. Read returns usage guidance.'),
